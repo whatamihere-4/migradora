@@ -5,51 +5,42 @@ services:
       dockerfile: orchestrator/Dockerfile
     container_name: migradora-orchestrator
     env_file: .env
+    environment:
+      DASHBOARD_BIND_PORT: "8080"
+      JD2_DOWNLOAD_DIR: /output
+      DOWNLOAD_DIR: /data/downloads
     ports:
       - "${DASHBOARD_PORT:-8080}:8080"
     volumes:
       - ./data/downloads:/data/downloads
       - ./data/state:/data/state
       - ./data/logs:/data/logs
+      - ./jd2/config-templates:/templates:ro
     restart: unless-stopped
+    depends_on:
+      jdownloader:
+        condition: service_started
     healthcheck:
       test: ["CMD", "curl", "-f", "http://localhost:8080/health"]
       interval: 30s
       timeout: 10s
       retries: 3
-      start_period: 20s
+      start_period: 30s
 
-  downloader:
-    build:
-      context: .
-      dockerfile: downloader/Dockerfile
-    container_name: migradora-downloader
+  jdownloader:
+    image: jlesage/jdownloader-2
+    container_name: migradora-jdownloader
     env_file: .env
     volumes:
-      - ./data/downloads:/data/downloads
-      - ./data/state:/data/state
-      - ./data/logs:/data/logs
+      - ./data/jd2/config:/config
+      - ./data/downloads:/output
+      - ./jd2/config-templates:/templates:ro
+    ports:
+      - "${JD2_WEBUI_PORT:-5800}:5800"
+      - "${JD2_API_PORT:-3128}:3128"
     restart: unless-stopped
-    depends_on:
-      orchestrator:
-        condition: service_started
 
-  uploader:
-    build:
-      context: .
-      dockerfile: uploader/Dockerfile
-    container_name: migradora-uploader
-    env_file: .env
-    volumes:
-      - ./data/downloads:/data/downloads
-      - ./data/state:/data/state
-      - ./data/logs:/data/logs
-    restart: unless-stopped
-    depends_on:
-      orchestrator:
-        condition: service_started
-
-  # Optional PIA VPN — route downloader/uploader through VPN:
+  # Optional PIA VPN — route jdownloader through VPN:
   #   docker compose -f docker-compose.yml -f docker-compose.vpn.yml --profile vpn up -d
   gluetun:
     profiles: ["vpn"]

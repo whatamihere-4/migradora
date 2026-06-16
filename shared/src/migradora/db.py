@@ -6,7 +6,7 @@ import sqlite3
 from pathlib import Path
 from typing import Any
 
-SCHEMA_VERSION = 1
+SCHEMA_VERSION = 2
 
 SCHEMA_SQL = """
 PRAGMA journal_mode=WAL;
@@ -33,6 +33,8 @@ CREATE TABLE IF NOT EXISTS files (
     is_part INTEGER NOT NULL DEFAULT 0,
     parent_file_id INTEGER,
     part_index INTEGER,
+    gofile_url TEXT,
+    jd2_package_name TEXT,
     created_at TEXT NOT NULL,
     updated_at TEXT NOT NULL,
     FOREIGN KEY (parent_file_id) REFERENCES files(id)
@@ -95,7 +97,21 @@ def init_db(db_path: str | Path) -> sqlite3.Connection:
     if row is None:
         conn.execute("INSERT INTO schema_version (version) VALUES (?)", (SCHEMA_VERSION,))
         conn.commit()
+    else:
+        current = row["version"]
+        if current < 2:
+            _migrate_v2(conn)
+            conn.execute("UPDATE schema_version SET version = ?", (SCHEMA_VERSION,))
+            conn.commit()
     return conn
+
+
+def _migrate_v2(conn: sqlite3.Connection) -> None:
+    cols = {r[1] for r in conn.execute("PRAGMA table_info(files)").fetchall()}
+    if "gofile_url" not in cols:
+        conn.execute("ALTER TABLE files ADD COLUMN gofile_url TEXT")
+    if "jd2_package_name" not in cols:
+        conn.execute("ALTER TABLE files ADD COLUMN jd2_package_name TEXT")
 
 
 def row_to_dict(row: Any) -> dict[str, Any]:

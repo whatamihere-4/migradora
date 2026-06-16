@@ -83,43 +83,7 @@ class FilesterClient:
             raise RuntimeError(f"Failed to create folder {name}: {data}")
         return str(folder_id)
 
-    def get_or_create_folder(self, name: str, cache: dict[str, str]) -> str:
-        if name in cache:
-            return cache[name]
-        for folder in self.list_folders():
-            if folder.get("name") == name:
-                fid = str(folder.get("id") or folder.get("identifier", ""))
-                cache[name] = fid
-                return fid
-        fid = self.create_folder(name)
-        cache[name] = fid
-        return fid
-
-    def ensure_folder_path(
-        self, path_parts: list[str], cache: dict[str, str], root_name: str
-    ) -> str | None:
-        """Ensure nested folder hierarchy exists; returns leaf folder ID."""
-        if not path_parts:
-            return None
-        current_id: str | None = None
-        built_path = ""
-        for part in path_parts:
-            built_path = f"{built_path}/{part}" if built_path else part
-            if built_path in cache:
-                current_id = cache[built_path]
-                continue
-            # Create under root or nested - Filester API creates top-level folders
-            # We use flat naming with path separator for simplicity when nesting unsupported
-            folder_name = built_path.replace("/", " - ")[-100:]
-            current_id = self.create_folder(folder_name)
-            cache[built_path] = current_id
-        return current_id
-
-    def upload_file(
-        self,
-        file_path: str | Path,
-        folder_id: str | None = None,
-    ) -> dict[str, Any]:
+    def upload_file(self, file_path: str | Path, folder_id: str | None = None) -> dict[str, Any]:
         file_path = Path(file_path)
         if not file_path.exists():
             raise FileNotFoundError(str(file_path))
@@ -132,11 +96,7 @@ class FilesterClient:
             try:
                 with open(file_path, "rb") as fh:
                     files = {"file": (file_path.name, fh, "application/octet-stream")}
-                    resp = self._client.post(
-                        "/api/v1/upload",
-                        files=files,
-                        headers=headers,
-                    )
+                    resp = self._client.post("/api/v1/upload", files=files, headers=headers)
                 if resp.status_code == 429:
                     time.sleep(self.retry_delay * (2 ** attempt))
                     continue
@@ -152,7 +112,7 @@ class FilesterClient:
 
     def verify_upload(self, slug: str, expected_size: int) -> bool:
         try:
-            status = self._request("GET", f"/api/v1/upload/status", params={"slug": slug})
+            status = self._request("GET", "/api/v1/upload/status", params={"slug": slug})
             if status.get("status") != "completed":
                 return False
             detail = self._request("GET", f"/api/v1/file/{slug}")

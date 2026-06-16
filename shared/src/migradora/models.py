@@ -35,6 +35,8 @@ class FileRecord:
     filename: str
     size_bytes: int
     download_link: str | None
+    gofile_url: str | None
+    jd2_package_name: str | None
     sha256: str | None
     status: FileStatus
     local_path: str | None
@@ -62,6 +64,8 @@ class FileRecord:
             filename=row["filename"],
             size_bytes=row["size_bytes"],
             download_link=row["download_link"],
+            gofile_url=row["gofile_url"] if "gofile_url" in row.keys() else None,
+            jd2_package_name=row["jd2_package_name"] if "jd2_package_name" in row.keys() else None,
             sha256=row["sha256"],
             status=FileStatus(row["status"]),
             local_path=row["local_path"],

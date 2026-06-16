@@ -65,9 +65,13 @@ class Settings:
     upload_retry_delay_sec: int = 30
     discovery_delay_sec: float = 2.0
 
-    # Gofile traffic guard
-    gofile_traffic_pause_gb: int = 90
-    gofile_traffic_check_interval_sec: int = 3600
+    # JDownloader2 (local Deprecated API)
+    jd2_host: str = "jdownloader"
+    jd2_port: int = 3128
+    jd2_download_dir: str = "/data/downloads"
+    jd2_api_timeout_sec: float = 30.0
+    jd2_poll_interval_sec: float = 5.0
+    jd2_crawl_timeout_sec: int = 600
 
     # Filester storage guard
     filester_storage_pause_pct: float = 95.0
@@ -82,6 +86,7 @@ class Settings:
     # Dashboard
     dashboard_host: str = "0.0.0.0"
     dashboard_port: int = 8080
+    dashboard_bind_port: int = 8080
     log_level: str = "INFO"
 
     # Worker
@@ -124,9 +129,13 @@ class Settings:
             upload_max_retries=_env_int("UPLOAD_MAX_RETRIES", 5),
             upload_retry_delay_sec=_env_int("UPLOAD_RETRY_DELAY_SEC", 30),
             discovery_delay_sec=float(_env("DISCOVERY_DELAY_SEC", "2")),
-            gofile_traffic_pause_gb=_env_int("GOFILE_TRAFFIC_PAUSE_GB", 90),
-            gofile_traffic_check_interval_sec=_env_int("GOFILE_TRAFFIC_CHECK_INTERVAL_SEC", 3600),
             filester_storage_pause_pct=float(_env("FILESTER_STORAGE_PAUSE_PCT", "95")),
+            jd2_host=_env("JD2_HOST", "jdownloader"),
+            jd2_port=_env_int("JD2_PORT", 3128),
+            jd2_download_dir=_env("JD2_DOWNLOAD_DIR", "/data/downloads"),
+            jd2_api_timeout_sec=float(_env("JD2_API_TIMEOUT_SEC", "30")),
+            jd2_poll_interval_sec=float(_env("JD2_POLL_INTERVAL_SEC", "5")),
+            jd2_crawl_timeout_sec=_env_int("JD2_CRAWL_TIMEOUT_SEC", 600),
             vpn_enabled=_env_bool("VPN_ENABLED", False),
             pia_openvpn_user=_env("PIA_OPENVPN_USER"),
             pia_openvpn_password=_env("PIA_OPENVPN_PASSWORD"),
@@ -134,6 +143,10 @@ class Settings:
             vpn_rotate_on_ban=_env_bool("VPN_ROTATE_ON_BAN", True),
             dashboard_host=_env("DASHBOARD_HOST", "0.0.0.0"),
             dashboard_port=_env_int("DASHBOARD_PORT", 8080),
+            dashboard_bind_port=_env_int(
+                "DASHBOARD_BIND_PORT",
+                _env_int("DASHBOARD_PORT", 8080),
+            ),
             log_level=_env("LOG_LEVEL", "INFO"),
             worker_poll_interval_sec=float(_env("WORKER_POLL_INTERVAL_SEC", "5")),
             heartbeat_interval_sec=_env_int("HEARTBEAT_INTERVAL_SEC", 30),
@@ -142,3 +155,4 @@ class Settings:
     def ensure_dirs(self) -> None:
         for path in (self.download_dir, self.state_dir, self.log_dir):
             Path(path).mkdir(parents=True, exist_ok=True)
+        Path(self.jd2_download_dir).mkdir(parents=True, exist_ok=True)

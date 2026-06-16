@@ -34,11 +34,13 @@ class QueueManager:
         gofile_path: str,
         filename: str,
         size_bytes: int,
-        download_link: str | None,
+        gofile_url: str | None = None,
+        download_link: str | None = None,
         parent_folder_path: str = "",
         force: bool = False,
     ) -> int | None:
         now = utc_now()
+        url = gofile_url or download_link
         with self.connection() as conn:
             existing = conn.execute(
                 "SELECT id, status FROM files WHERE gofile_content_id = ?",
@@ -57,15 +59,17 @@ class QueueManager:
 
             cur = conn.execute(
                 """INSERT INTO files (
-                    gofile_content_id, gofile_path, filename, size_bytes, download_link,
-                    status, parent_folder_path, created_at, updated_at
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                    gofile_content_id, gofile_path, filename, size_bytes,
+                    download_link, gofile_url, status, parent_folder_path,
+                    created_at, updated_at
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
                 (
                     gofile_content_id,
                     gofile_path,
                     filename,
                     size_bytes,
                     download_link,
+                    url,
                     FileStatus.PENDING.value,
                     parent_folder_path,
                     now,
@@ -73,6 +77,9 @@ class QueueManager:
                 ),
             )
             return cur.lastrowid
+
+    def claim_pending_job(self) -> FileRecord | None:
+        return self.claim_download_job()
 
     def enqueue_part(
         self,
@@ -169,6 +176,8 @@ class QueueManager:
         filester_slug: list[str] | None = None,
         last_error: str | None = None,
         download_link: str | None = None,
+        gofile_url: str | None = None,
+        jd2_package_name: str | None = None,
     ) -> None:
         fields: list[str] = ["updated_at = ?"]
         values: list[Any] = [utc_now()]
@@ -190,6 +199,12 @@ class QueueManager:
         if download_link is not None:
             fields.append("download_link = ?")
             values.append(download_link)
+        if gofile_url is not None:
+            fields.append("gofile_url = ?")
+            values.append(gofile_url)
+        if jd2_package_name is not None:
+            fields.append("jd2_package_name = ?")
+            values.append(jd2_package_name)
         values.append(file_id)
         with self.connection() as conn:
             conn.execute(

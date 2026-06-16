@@ -7,7 +7,7 @@ import json
 import sys
 
 from migradora.config import Settings
-from migradora.discovery.gofile_crawler import discover_and_enqueue
+from migradora.discovery.jd2_discovery import discover_and_enqueue
 from migradora.logger import setup_logging
 from migradora.models import QueueState
 from migradora.orchestrator import run_orchestrator

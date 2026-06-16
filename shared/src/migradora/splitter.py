@@ -16,10 +16,6 @@ def split_file(
     part_size_bytes: int,
     base_name: str | None = None,
 ) -> list[dict]:
-    """
-    Split a file into fixed-size parts using split(1).
-    Returns list of dicts: {path, filename, size_bytes, part_index}.
-    """
     source = Path(source)
     output_dir = Path(output_dir)
     output_dir.mkdir(parents=True, exist_ok=True)
@@ -38,7 +34,6 @@ def split_file(
 
     stem = base_name or source.stem
     prefix = f"{stem}.part"
-    # split -b uses suffix aa, ab, ... rename to .part001 style
     cmd = [
         "split",
         "-b", str(part_size_bytes),
@@ -63,14 +58,6 @@ def split_file(
             "part_index": idx + 1,
         })
 
-    expected_parts = math.ceil(total_size / part_size_bytes)
-    if len(parts) != expected_parts:
-        logger.warning(
-            "Expected %d parts, got %d for %s",
-            expected_parts, len(parts), source,
-        )
-
-    # Remove original after successful split
     source.unlink()
     logger.info("Split %s into %d parts", source.name, len(parts))
     return parts
