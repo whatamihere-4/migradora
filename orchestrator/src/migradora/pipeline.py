@@ -10,7 +10,7 @@ from pathlib import Path
 
 from migradora.config import Settings
 from migradora.filester_client import FilesterClient
-from migradora.jdownloader.client import JDownloaderClient
+from migradora.jdownloader.client import JDownloaderClient, _as_int_list
 from migradora.models import FileStatus, QueueState
 from migradora.queue.manager import QueueManager
 from migradora.splitter import split_file
@@ -215,8 +215,8 @@ class PipelineCoordinator:
                 host=self.settings.jd2_host,
                 port=self.settings.jd2_port,
             )
-            packages = jd2_pkg_cleanup.query_download_packages(packageName=pkg_name)
-            pkg_ids = [p.get("uuid") for p in packages if p.get("uuid")]
+            packages = jd2_pkg_cleanup.query_download_packages(package_name=pkg_name)
+            pkg_ids = _as_int_list([p.get("uuid") for p in packages])
             jd2_pkg_cleanup.remove_downloads(package_ids=pkg_ids)
             jd2_pkg_cleanup.close()
         except Exception as exc:

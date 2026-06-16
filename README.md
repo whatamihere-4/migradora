@@ -151,7 +151,7 @@ cat video.part*.mp4 > video.mp4
 | `jq: ... GraphicalUserInterfaceSettings.json: No such file` on jdownloader start | Partial `cfg/` broke init. Run `./scripts/jd2-reset-config.sh`, then follow first-run steps |
 | `curl :3128/help` connection refused | Run `./scripts/jd2-enable-api.sh` then `docker compose restart jdownloader` |
 | `JD2 API not reachable` in discover | Same as above; wait for `curl http://localhost:3128/help` |
-| Discover finds 0 files | Check `docker compose logs jdownloader`; test URL in JD2 web UI |
+| Discover finds 0 files / crawl timeout | Rebuild orchestrator after updates; confirm folder expands in JD2 web UI (:5800) |
 | Pipeline stuck on downloading | Gofile traffic limits or JD2 plugin issue — check JD2 logs |
 | Queue paused (storage) | Free Filester account space |
 
