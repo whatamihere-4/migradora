@@ -15,6 +15,7 @@ services:
       - ./data/downloads:/data/downloads
       - ./data/state:/data/state
       - ./data/logs:/data/logs
+      - ./data/jd2/config:/jd2-config
       - ./jd2/config-templates:/templates:ro
     restart: unless-stopped
     depends_on:
@@ -31,14 +32,22 @@ services:
     image: jlesage/jdownloader-2
     container_name: migradora-jdownloader
     env_file: .env
+    environment:
+      # Allow container to fix ownership of /config on first run
+      TAKE_CONFIG_OWNERSHIP: "1"
     volumes:
       - ./data/jd2/config:/config
       - ./data/downloads:/output
-      - ./jd2/config-templates:/templates:ro
     ports:
       - "${JD2_WEBUI_PORT:-5800}:5800"
       - "${JD2_API_PORT:-3128}:3128"
     restart: unless-stopped
+    healthcheck:
+      test: ["CMD-SHELL", "wget -qO- http://127.0.0.1:5800 >/dev/null 2>&1 || exit 1"]
+      interval: 30s
+      timeout: 10s
+      retries: 10
+      start_period: 180s
 
   # Optional PIA VPN — route jdownloader through VPN:
   #   docker compose -f docker-compose.yml -f docker-compose.vpn.yml --profile vpn up -d

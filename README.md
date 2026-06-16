@@ -21,19 +21,33 @@ cp .env.example .env
 # Edit GOFILE_FOLDER_URLS, FILESTER_API_KEY
 ```
 
-### 2. Enable JD2 Deprecated API (first run)
+### 2. First-run JDownloader setup
+
+**Do not** copy anything into `data/jd2/config/cfg/` before JD2 has started once — a partial `cfg/` folder breaks the container init script.
 
 ```bash
-# Seed API config template
-mkdir -p data/jd2/config/cfg
-cp jd2/config-templates/org.jdownloader.api.RemoteAPIConfig.json \
-   data/jd2/config/cfg/
+# Ensure config volume is empty (see troubleshooting if you already copied files)
+mkdir -p data/jd2/config   # empty directory only
 
-docker compose up -d
+docker compose up -d jdownloader
+
+# Wait ~2 minutes until web UI loads:
+#   http://your-vps:5800
+
+# Enable local Deprecated API (port 3128)
+chmod +x scripts/jd2-enable-api.sh
+./scripts/jd2-enable-api.sh
+docker compose restart jdownloader
+
+# Verify API
+curl http://localhost:3128/help
+
+# Start orchestrator (pipeline + dashboard)
+docker compose up -d orchestrator
 ```
 
-Open **http://your-vps:5800** (JD2 web UI) and confirm:
-- Settings → Advanced → search `RemoteAPI` → Deprecated API enabled
+In the JD2 web UI (http://your-vps:5800), also confirm:
+- Settings → Advanced → `RemoteAPI` → Deprecated API **enabled**
 - Deprecated API localhost only: **disabled**
 - Max simultaneous downloads: **1**
 - Default download folder: `/output`
@@ -134,9 +148,11 @@ cat video.part*.mp4 > video.mp4
 
 | Symptom | Fix |
 |---------|-----|
-| `JD2 API not reachable` | Enable Deprecated API, disable localhost-only, expose port 3128 |
-| Discover finds 0 files | Check JD2 logs; verify Gofile plugin; test URL in JD2 UI |
-| Pipeline stuck on downloading | `docker compose logs jdownloader`; check Gofile traffic limits |
+| `jq: ... GraphicalUserInterfaceSettings.json: No such file` on jdownloader start | Partial `cfg/` broke init. Run `./scripts/jd2-reset-config.sh`, then follow first-run steps |
+| `curl :3128/help` connection refused | Run `./scripts/jd2-enable-api.sh` then `docker compose restart jdownloader` |
+| `JD2 API not reachable` in discover | Same as above; wait for `curl http://localhost:3128/help` |
+| Discover finds 0 files | Check `docker compose logs jdownloader`; test URL in JD2 web UI |
+| Pipeline stuck on downloading | Gofile traffic limits or JD2 plugin issue — check JD2 logs |
 | Queue paused (storage) | Free Filester account space |
 
 ## License

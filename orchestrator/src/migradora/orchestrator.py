@@ -86,6 +86,20 @@ def run_orchestrator(settings: Settings | None = None) -> None:
     settings = settings or Settings.load()
     settings.ensure_dirs()
     setup_logging("orchestrator", settings.log_dir, settings.log_level)
+
+    from migradora.jd2_config import ensure_remote_api_enabled, jd2_initialized
+    if jd2_initialized("/jd2-config"):
+        if ensure_remote_api_enabled("/jd2-config", "/templates"):
+            logger.warning(
+                "JD2 Remote API config was updated — restart jdownloader: "
+                "docker compose restart jdownloader"
+            )
+    else:
+        logger.warning(
+            "JD2 not initialized. Start with empty data/jd2/config, wait for "
+            "web UI :5800, then run: ./scripts/jd2-enable-api.sh"
+        )
+
     orch = Orchestrator(settings)
     orch.start_background()
     logger.info("Orchestrator started (pipeline + monitors)")

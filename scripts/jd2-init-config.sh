@@ -1,10 +1,19 @@
 #!/bin/sh
-# Seed JD2 Deprecated API config on first run (idempotent).
+# Internal helper (orchestrator image). Host users should run ./scripts/jd2-enable-api.sh
 set -e
-TEMPLATE_DIR="/templates"
-TARGET_DIR="${JD2_CONFIG_DIR:-/data/jd2/config}/cfg"
-mkdir -p "$TARGET_DIR"
-if [ -f "$TEMPLATE_DIR/org.jdownloader.api.RemoteAPIConfig.json" ]; then
-  cp -n "$TEMPLATE_DIR/org.jdownloader.api.RemoteAPIConfig.json" \
-    "$TARGET_DIR/org.jdownloader.api.RemoteAPIConfig.json" 2>/dev/null || true
+CFG_DIR="${JD2_CONFIG_DIR:-/jd2-config}/cfg"
+GUI="$CFG_DIR/org.jdownloader.settings.GraphicalUserInterfaceSettings.json"
+API="$CFG_DIR/org.jdownloader.api.RemoteAPIConfig.json"
+TEMPLATE="/templates/org.jdownloader.api.RemoteAPIConfig.json"
+
+if [ ! -f "$GUI" ]; then
+  echo "jd2-init-config: JD2 not initialized; skipping"
+  exit 0
+fi
+
+mkdir -p "$CFG_DIR"
+if [ -f "$TEMPLATE" ]; then
+  cp "$TEMPLATE" "$API"
+elif [ ! -f "$API" ]; then
+  printf '%s\n' '{"deprecatedapienabled":true,"deprecatedapilocalhostonly":false,"port":3128}' > "$API"
 fi

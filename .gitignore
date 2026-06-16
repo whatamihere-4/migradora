@@ -11,9 +11,6 @@ data/state/*
 data/logs/*
 data/jd2/config/*
 !data/jd2/config/.gitkeep
-!data/jd2/config/cfg/
-data/jd2/config/cfg/*
-!data/jd2/config/cfg/org.jdownloader.api.RemoteAPIConfig.json
 !data/downloads/.gitkeep
 !data/state/.gitkeep
 !data/logs/.gitkeep
