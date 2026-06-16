@@ -70,6 +70,23 @@ def _as_int_list(values: list[Any] | None) -> list[int]:
     return out
 
 
+def _unwrap_data(result: Any) -> Any:
+    """JD2 Deprecated API wraps payloads as {\"data\": ...}."""
+    if isinstance(result, dict) and "data" in result:
+        return result["data"]
+    return result
+
+
+def _as_list(result: Any) -> list[dict[str, Any]]:
+    data = _unwrap_data(result)
+    return data if isinstance(data, list) else []
+
+
+def _as_dict(result: Any) -> dict[str, Any]:
+    data = _unwrap_data(result)
+    return data if isinstance(data, dict) else {}
+
+
 class JDownloaderClient:
     def __init__(
         self,
@@ -119,13 +136,14 @@ class JDownloaderClient:
 
     def is_collecting(self) -> bool:
         result = self._get("/linkgrabberv2/isCollecting")
-        return bool(result)
+        return bool(_unwrap_data(result))
 
     def package_count(self) -> int:
         result = self._get("/downloadsV2/packageCount")
-        if isinstance(result, int):
-            return result
-        return int(result or 0)
+        data = _unwrap_data(result)
+        if isinstance(data, int):
+            return data
+        return int(data or 0)
 
     def add_links(
         self,
@@ -152,9 +170,8 @@ class JDownloaderClient:
             body["downloadPassword"] = download_password
         logger.info("JD2 addLinks: %s -> %s", package_name, url[:80])
         result = self._post("/linkgrabberv2/addLinks", body)
-        if isinstance(result, dict):
-            return _as_int(result.get("id"))
-        return None
+        job = _as_dict(result)
+        return _as_int(job.get("id"))
 
     def query_download_packages(
         self,
@@ -166,7 +183,7 @@ class JDownloaderClient:
         if package_uuids:
             body["packageUUIDs"] = package_uuids
         result = self._post("/downloadsV2/queryPackages", body)
-        packages = result if isinstance(result, list) else []
+        packages = _as_list(result)
         if package_name:
             packages = [p for p in packages if p.get("name") == package_name]
         return packages
@@ -183,7 +200,7 @@ class JDownloaderClient:
         if job_uuids:
             body["jobUUIDs"] = job_uuids
         result = self._post("/downloadsV2/queryLinks", body)
-        return result if isinstance(result, list) else []
+        return _as_list(result)
 
     def query_linkgrabber_links(
         self,
@@ -197,7 +214,7 @@ class JDownloaderClient:
         if job_uuids:
             body["jobUUIDs"] = job_uuids
         result = self._post("/linkgrabberv2/queryLinks", body)
-        return result if isinstance(result, list) else []
+        return _as_list(result)
 
     def query_linkgrabber_packages(
         self,
@@ -209,7 +226,7 @@ class JDownloaderClient:
         if package_uuids:
             body["packageUUIDs"] = package_uuids
         result = self._post("/linkgrabberv2/queryPackages", body)
-        packages = result if isinstance(result, list) else []
+        packages = _as_list(result)
         if package_name:
             packages = [p for p in packages if p.get("name") == package_name]
         return packages
@@ -282,18 +299,30 @@ class JDownloaderClient:
         self,
         package_name: str,
         job_id: int | None,
+        *,
+        known_link_ids: set[int] | None = None,
     ) -> list[dict[str, Any]]:
         if job_id is not None:
             links = self.query_linkgrabber_links(job_uuids=[job_id])
             if links:
                 return links
+
         packages = self.query_linkgrabber_packages(package_name=package_name)
-        if not packages:
-            return []
-        pkg_uuid = _as_int(packages[0].get("uuid"))
-        if pkg_uuid is None:
-            return []
-        return self.query_linkgrabber_links(package_uuids=[pkg_uuid])
+        if packages:
+            pkg_uuid = _as_int(packages[0].get("uuid"))
+            if pkg_uuid is not None:
+                links = self.query_linkgrabber_links(package_uuids=[pkg_uuid])
+                if links:
+                    return links
+
+        all_links = self.query_linkgrabber_links()
+        if known_link_ids:
+            return [
+                link
+                for link in all_links
+                if _as_int(link.get("uuid")) not in known_link_ids
+            ]
+        return all_links
 
     def wait_for_linkgrabber_crawl(
         self,
@@ -301,6 +330,8 @@ class JDownloaderClient:
         job_id: int | None = None,
         timeout_sec: int = 600,
         stable_polls: int = 3,
+        *,
+        known_link_ids: set[int] | None = None,
     ) -> list[dict[str, Any]]:
         """Poll linkgrabber until crawl finishes and link count stabilizes."""
         deadline = time.time() + timeout_sec
@@ -313,7 +344,11 @@ class JDownloaderClient:
             if collecting:
                 saw_collecting = True
 
-            links = self._links_for_crawl(package_name, job_id)
+            links = self._links_for_crawl(
+                package_name,
+                job_id,
+                known_link_ids=known_link_ids,
+            )
             count = len(links)
             crawl_done = not collecting and (saw_collecting or count > 0)
 

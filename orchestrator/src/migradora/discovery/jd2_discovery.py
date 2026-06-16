@@ -8,7 +8,7 @@ import time
 import uuid
 
 from migradora.config import Settings
-from migradora.jdownloader.client import JDownloaderClient, _as_int_list
+from migradora.jdownloader.client import JDownloaderClient, _as_int, _as_int_list
 from migradora.queue.manager import QueueManager
 
 logger = logging.getLogger("migradora.discovery")
@@ -37,7 +37,12 @@ def discover_and_enqueue(settings: Settings, force: bool = False) -> dict[str, i
         for folder_url in settings.gofile_folder_urls:
             pkg_name = f"migradora-discover-{uuid.uuid4().hex[:8]}"
             logger.info("Discovering via JD2: %s", folder_url)
-            job_id = jd2.add_links(
+            known_link_ids = {
+                uid
+                for link in jd2.query_linkgrabber_links()
+                if (uid := _as_int(link.get("uuid"))) is not None
+            }
+            crawl_job_id = jd2.add_links(
                 folder_url,
                 package_name=pkg_name,
                 destination_folder=settings.jd2_download_dir,
@@ -49,8 +54,9 @@ def discover_and_enqueue(settings: Settings, force: bool = False) -> dict[str, i
             try:
                 links = jd2.wait_for_linkgrabber_crawl(
                     pkg_name,
-                    job_id=job_id,
+                    job_id=crawl_job_id,
                     timeout_sec=settings.jd2_crawl_timeout_sec,
+                    known_link_ids=known_link_ids,
                 )
             except TimeoutError as exc:
                 logger.error("Crawl timed out for %s: %s", folder_url, exc)
@@ -94,7 +100,7 @@ def discover_and_enqueue(settings: Settings, force: bool = False) -> dict[str, i
                 stats["discovered"] += 1
                 parent = folder_url.rstrip("/").split("/")[-1]
                 gofile_path = f"{parent}/{name}"
-                job_id = queue.enqueue_file(
+                queue_job_id = queue.enqueue_file(
                     gofile_content_id=_content_id(url),
                     gofile_path=gofile_path,
                     filename=name,
@@ -103,7 +109,7 @@ def discover_and_enqueue(settings: Settings, force: bool = False) -> dict[str, i
                     parent_folder_path=parent,
                     force=force,
                 )
-                if job_id:
+                if queue_job_id:
                     stats["enqueued"] += 1
                     logger.info("Enqueued: %s (%d bytes)", gofile_path, size)
                 else:
