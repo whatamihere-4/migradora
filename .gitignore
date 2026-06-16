@@ -1,0 +1,18 @@
+# Python
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+
+# Data & secrets
+.env
+data/downloads/*
+data/state/*
+data/logs/*
+!data/downloads/.gitkeep
+!data/state/.gitkeep
+!data/logs/.gitkeep
+
+# IDE
+.idea/
+.vscode/

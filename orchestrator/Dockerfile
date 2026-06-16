@@ -1,0 +1,26 @@
+FROM python:3.12-slim
+
+WORKDIR /app
+
+RUN apt-get update \
+    && apt-get install -y --no-install-recommends curl \
+    && rm -rf /var/lib/apt/lists/*
+
+COPY shared/requirements.txt /app/shared/requirements.txt
+COPY orchestrator/requirements.txt /app/orchestrator/requirements.txt
+RUN pip install --no-cache-dir \
+    -r /app/shared/requirements.txt \
+    -r /app/orchestrator/requirements.txt
+
+COPY shared/src /app/shared/src
+COPY orchestrator/src /app/orchestrator/src
+
+ENV PYTHONPATH=/app/shared/src:/app/orchestrator/src
+ENV PYTHONUNBUFFERED=1
+
+EXPOSE 8080
+
+HEALTHCHECK --interval=30s --timeout=10s --retries=3 --start-period=15s \
+    CMD curl -f http://localhost:8080/health || exit 1
+
+CMD ["python", "-m", "migradora", "run"]

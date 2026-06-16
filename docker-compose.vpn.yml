@@ -1,0 +1,20 @@
+# VPN overlay: routes downloader and uploader through gluetun.
+# Usage:
+#   docker compose -f docker-compose.yml -f docker-compose.vpn.yml --profile vpn up -d
+services:
+  downloader:
+    network_mode: "service:gluetun"
+    depends_on:
+      gluetun:
+        condition: service_healthy
+
+  uploader:
+    network_mode: "service:gluetun"
+    depends_on:
+      gluetun:
+        condition: service_healthy
+
+  orchestrator:
+    # Orchestrator stays on default network for dashboard access
+    ports:
+      - "${DASHBOARD_PORT:-8080}:8080"

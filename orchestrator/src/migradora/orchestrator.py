@@ -1,0 +1,88 @@
+"""Main orchestrator: monitors, discovery triggers, background tasks."""
+
+from __future__ import annotations
+
+import logging
+import threading
+import time
+
+from migradora.config import Settings
+from migradora.discovery.gofile_crawler import discover_and_enqueue
+from migradora.logger import setup_logging
+from migradora.models import QueueState
+from migradora.monitor.filester_storage import FilesterStorageMonitor
+from migradora.monitor.gofile_traffic import GofileTrafficMonitor
+from migradora.queue.manager import QueueManager
+
+logger = logging.getLogger("migradora.orchestrator")
+
+
+def write_heartbeat(state_dir: str) -> None:
+    from pathlib import Path
+    Path(state_dir, "orchestrator.heartbeat").write_text(str(time.time()))
+
+
+class Orchestrator:
+    def __init__(self, settings: Settings) -> None:
+        self.settings = settings
+        self.queue = QueueManager(settings.db_path)
+        self.gofile_monitor = GofileTrafficMonitor(settings, self.queue)
+        self.filester_monitor = FilesterStorageMonitor(settings, self.queue)
+        self._stop = threading.Event()
+
+    def monitor_loop(self) -> None:
+        interval = self.settings.gofile_traffic_check_interval_sec
+        while not self._stop.is_set():
+            write_heartbeat(self.settings.state_dir)
+            self.queue.reset_stale_jobs(self.settings.stale_job_timeout_sec)
+
+            state, reason = self.queue.get_queue_state()
+            if state == QueueState.PAUSED_DISK:
+                from migradora.utils import free_disk_gb
+                free_gb = free_disk_gb(self.settings.download_dir)
+                if free_gb >= self.settings.min_free_disk_gb:
+                    self.queue.set_queue_state(QueueState.RUNNING, "")
+                    logger.info("Disk space recovered (%.1f GB free), resuming", free_gb)
+
+            self.gofile_monitor.check_and_pause()
+            self.filester_monitor.check_and_pause()
+            self._stop.wait(interval)
+
+    def start_monitors(self) -> threading.Thread:
+        t = threading.Thread(target=self.monitor_loop, daemon=True, name="monitor-loop")
+        t.start()
+        return t
+
+    def discover(self, force: bool = False) -> dict:
+        return discover_and_enqueue(self.settings, force=force)
+
+    def resume(self) -> None:
+        self.queue.set_queue_state(QueueState.RUNNING, "")
+        logger.info("Queue resumed")
+
+    def pause(self, reason: str = "manual") -> None:
+        self.queue.set_queue_state(QueueState.PAUSED, reason)
+        logger.info("Queue paused: %s", reason)
+
+    def stop(self) -> None:
+        self._stop.set()
+
+
+def run_orchestrator(settings: Settings | None = None) -> None:
+    settings = settings or Settings.load()
+    settings.ensure_dirs()
+    setup_logging("orchestrator", settings.log_dir, settings.log_level)
+    orch = Orchestrator(settings)
+    orch.start_monitors()
+    logger.info("Orchestrator monitors started")
+
+    from migradora.api.app import create_app
+    import uvicorn
+
+    app = create_app(settings, orch)
+    uvicorn.run(
+        app,
+        host=settings.dashboard_host,
+        port=settings.dashboard_port,
+        log_level=settings.log_level.lower(),
+    )
