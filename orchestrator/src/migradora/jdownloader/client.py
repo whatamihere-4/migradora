@@ -119,6 +119,14 @@ class JDownloaderClient:
             return None
         return resp.json()
 
+    def _post_action(self, path: str, *params: Any) -> Any:
+        """POST multi-parameter JD2 actions (body is a JSON array of arguments)."""
+        resp = self._client.post(path, json=list(params))
+        resp.raise_for_status()
+        if not resp.content:
+            return None
+        return resp.json()
+
     def _get(self, path: str) -> Any:
         resp = self._client.get(path)
         resp.raise_for_status()
@@ -236,22 +244,31 @@ class JDownloaderClient:
         link_ids: list[int] | None = None,
         package_ids: list[int] | None = None,
     ) -> None:
-        body: dict[str, Any] = {
-            "linkIds": link_ids or [],
-            "packageIds": package_ids or [],
-        }
-        self._post("/linkgrabberv2/removeLinks", body)
+        links = link_ids or []
+        packages = package_ids or []
+        if not links and not packages:
+            return
+        # JD2 expects [linkIds, packageIds]; use [0] when removing by package only.
+        self._post_action(
+            "/linkgrabberv2/removeLinks",
+            links if links else [0],
+            packages,
+        )
 
     def remove_downloads(
         self,
         link_ids: list[int] | None = None,
         package_ids: list[int] | None = None,
     ) -> None:
-        body: dict[str, Any] = {
-            "linkIds": link_ids or [],
-            "packageIds": package_ids or [],
-        }
-        self._post("/downloadsV2/removeLinks", body)
+        links = link_ids or []
+        packages = package_ids or []
+        if not links and not packages:
+            return
+        self._post_action(
+            "/downloadsV2/removeLinks",
+            links if links else [0],
+            packages,
+        )
 
     def wait_until_package_finished(
         self,

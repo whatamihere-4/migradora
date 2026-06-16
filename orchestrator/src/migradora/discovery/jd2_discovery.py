@@ -88,8 +88,10 @@ def discover_and_enqueue(settings: Settings, force: bool = False) -> dict[str, i
                 ]
 
             packages = jd2.query_linkgrabber_packages(package_name=pkg_name)
-            pkg_ids = [p.get("uuid") for p in packages if p.get("uuid")]
-            link_ids = [l.get("uuid") for l in links if l.get("uuid")]
+            pkg_ids = _as_int_list([p.get("uuid") for p in packages])
+            if not pkg_ids:
+                pkg_ids = _as_int_list([link.get("packageUUID") for link in links])
+            link_ids = _as_int_list([link.get("uuid") for link in links])
 
             for link in file_links:
                 url = link.get("url") or link.get("variant") or ""
@@ -116,10 +118,10 @@ def discover_and_enqueue(settings: Settings, force: bool = False) -> dict[str, i
                     stats["skipped"] += 1
 
             try:
-                jd2.remove_linkgrabber(
-                    link_ids=_as_int_list(link_ids),
-                    package_ids=_as_int_list(pkg_ids),
-                )
+                if pkg_ids:
+                    jd2.remove_linkgrabber(package_ids=pkg_ids)
+                elif link_ids:
+                    jd2.remove_linkgrabber(link_ids=link_ids)
             except Exception as exc:
                 logger.warning("Failed to clean linkgrabber after discover: %s", exc)
 
