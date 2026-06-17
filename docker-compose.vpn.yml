@@ -7,7 +7,8 @@ services:
     depends_on:
       gluetun:
         condition: service_healthy
-    ports: []
+    # Base compose publishes JD2 ports; must clear when sharing gluetun's network stack.
+    ports: !override []
 
   gluetun:
     ports:

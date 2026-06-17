@@ -130,6 +130,8 @@ Start with VPN (JD2 downloads go through PIA; orchestrator stays on normal netwo
 docker compose -f docker-compose.yml -f docker-compose.vpn.yml --profile vpn up -d
 ```
 
+Requires Docker Compose v2.23+ (`ports: !override` in the VPN overlay). Check with `docker compose version`.
+
 JD2 web UI and API move to gluetun's ports (same host ports `5800` / `3128`).
 
 ### Rotate egress IP
