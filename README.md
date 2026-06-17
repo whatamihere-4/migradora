@@ -105,13 +105,49 @@ docker compose exec orchestrator python -m migradora resume
 | `POST /resume` | Resume paused queue |
 | `POST /pause` | Pause queue |
 
-## VPN (optional)
+## VPN (optional — Gofile IP blocks)
+
+Gofile free downloads are often limited **per IP**, not per VPS disk usage. The old orchestrator also paused on **account** traffic (~222 GB lifetime on a Gofile token) — that monitor is gone, but the pause may still be stuck in SQLite. Clear it with:
+
+```bash
+docker compose exec orchestrator python -m migradora resume
+```
+
+### Enable PIA via gluetun
+
+Add to `.env`:
+
+```bash
+VPN_ENABLED=true
+PIA_OPENVPN_USER=your_pia_username
+PIA_OPENVPN_PASSWORD=your_pia_password
+PIA_SERVER_REGIONS=Netherlands,Switzerland,France,Germany
+```
+
+Start with VPN (JD2 downloads go through PIA; orchestrator stays on normal network):
 
 ```bash
 docker compose -f docker-compose.yml -f docker-compose.vpn.yml --profile vpn up -d
 ```
 
-Routes `jdownloader` through PIA VPN.
+JD2 web UI and API move to gluetun's ports (same host ports `5800` / `3128`).
+
+### Rotate egress IP
+
+```bash
+chmod +x scripts/vpn-rotate.sh scripts/vpn-status.sh
+./scripts/vpn-status.sh
+./scripts/vpn-rotate.sh
+docker compose exec orchestrator python -m migradora resume
+```
+
+Or via API:
+
+```bash
+curl -X POST http://localhost:8080/vpn/rotate
+```
+
+With `VPN_ROTATE_ON_BAN=true`, the pipeline auto-rotates VPN when JD2 reports a Gofile traffic/block error.
 
 ## Monitoring
 
@@ -152,7 +188,8 @@ cat video.part*.mp4 > video.mp4
 | `curl :3128/help` connection refused | Run `./scripts/jd2-enable-api.sh` then `docker compose restart jdownloader` |
 | `JD2 API not reachable` in discover | Same as above; wait for `curl http://localhost:3128/help` |
 | Discover finds 0 files / crawl timeout | Rebuild orchestrator after updates; confirm folder expands in JD2 web UI (:5800) |
-| Pipeline stuck on downloading | Gofile traffic limits or JD2 plugin issue — check JD2 logs |
+| Pipeline stuck on downloading | Gofile IP/traffic block — enable VPN, run `./scripts/vpn-rotate.sh`, resume |
+| `paused_traffic` / 222 GB message | Stale pause from old account monitor — `python -m migradora resume`; use VPN for IP blocks |
 | Queue paused (storage) | Free Filester account space |
 
 ## License

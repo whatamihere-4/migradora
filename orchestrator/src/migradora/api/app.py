@@ -111,4 +111,18 @@ def create_app(settings: Settings, orchestrator: Orchestrator) -> FastAPI:
         result = orchestrator.discover(force=force)
         return {"status": "ok", **result}
 
+    @app.post("/vpn/rotate")
+    def vpn_rotate() -> dict[str, Any]:
+        if not settings.vpn_enabled:
+            return {"status": "error", "message": "Set VPN_ENABLED=true and use docker-compose.vpn.yml"}
+        from migradora.vpn import get_egress_ip, rotate_vpn
+
+        before = get_egress_ip(settings.gluetun_control_url)
+        result = rotate_vpn(settings.gluetun_control_url)
+        return {
+            "status": "ok",
+            "ip_before": result.get("ip_before") or before,
+            "ip_after": result.get("ip_after"),
+        }
+
     return app

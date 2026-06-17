@@ -15,6 +15,7 @@ from migradora.models import FileStatus, QueueState
 from migradora.queue.manager import QueueManager
 from migradora.splitter import split_file
 from migradora.utils import free_disk_gb
+from migradora.vpn import is_gofile_traffic_block, rotate_vpn
 
 logger = logging.getLogger("migradora.pipeline")
 
@@ -93,6 +94,31 @@ class PipelineCoordinator:
     def stop(self) -> None:
         self._stop.set()
 
+    def _handle_gofile_traffic_block(self, job_id: int, message: str) -> None:
+        logger.warning("Gofile traffic/IP block detected for job %d: %s", job_id, message)
+        self.queue.mark_failed(job_id, message, retry=True)
+
+        if self.settings.vpn_enabled and self.settings.vpn_rotate_on_ban:
+            try:
+                result = rotate_vpn(self.settings.gluetun_control_url)
+                logger.info(
+                    "VPN rotated after Gofile block (%s -> %s)",
+                    result.get("ip_before"),
+                    result.get("ip_after"),
+                )
+                self.queue.set_queue_state(
+                    QueueState.RUNNING,
+                    "VPN rotated after Gofile traffic block",
+                )
+                return
+            except Exception as exc:
+                logger.error("VPN rotate failed: %s", exc)
+
+        self.queue.set_queue_state(
+            QueueState.PAUSED_TRAFFIC,
+            f"Gofile traffic/IP block — rotate VPN then resume: {message[:200]}",
+        )
+
     def run_loop(self) -> None:
         logger.info("Pipeline coordinator started")
         while not self._stop.is_set():
@@ -124,6 +150,9 @@ class PipelineCoordinator:
                 self._process_job(job)
             except Exception as exc:
                 logger.error("Pipeline failed for job %d: %s", job.id, exc)
+                if is_gofile_traffic_block(str(exc)):
+                    self._handle_gofile_traffic_block(job.id, str(exc))
+                    continue
                 if job.attempts >= self.settings.download_max_retries:
                     self.queue.mark_failed(job.id, str(exc), retry=False)
                 else:

@@ -101,6 +101,14 @@ def run_orchestrator(settings: Settings | None = None) -> None:
         )
 
     orch = Orchestrator(settings)
+    state, reason = orch.queue.get_queue_state()
+    if state.value == "paused_traffic" and "GB" in (reason or ""):
+        logger.warning(
+            "Queue is paused_traffic from an old Gofile account traffic check (%s). "
+            "That monitor was removed — this is not your VPS usage. "
+            "Run: python -m migradora resume  (or enable VPN + rotate IP for download blocks)",
+            reason,
+        )
     orch.start_background()
     logger.info("Orchestrator started (pipeline + monitors)")
 

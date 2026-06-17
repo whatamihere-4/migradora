@@ -81,6 +81,8 @@ class Settings:
     pia_openvpn_user: str = ""
     pia_openvpn_password: str = ""
     pia_server_region: str = "Netherlands"
+    pia_server_regions: list[str] = field(default_factory=list)
+    gluetun_control_url: str = "http://gluetun:8000"
     vpn_rotate_on_ban: bool = True
 
     # Dashboard
@@ -140,6 +142,10 @@ class Settings:
             pia_openvpn_user=_env("PIA_OPENVPN_USER"),
             pia_openvpn_password=_env("PIA_OPENVPN_PASSWORD"),
             pia_server_region=_env("PIA_SERVER_REGION", "Netherlands"),
+            pia_server_regions=_env_list("PIA_SERVER_REGIONS")
+            or _env_list("PIA_SERVER_REGION")
+            or ["Netherlands"],
+            gluetun_control_url=_env("GLUETUN_CONTROL_URL", "http://gluetun:8000"),
             vpn_rotate_on_ban=_env_bool("VPN_ROTATE_ON_BAN", True),
             dashboard_host=_env("DASHBOARD_HOST", "0.0.0.0"),
             dashboard_port=_env_int("DASHBOARD_PORT", 8080),

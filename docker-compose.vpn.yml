@@ -1,4 +1,4 @@
-# VPN overlay: routes jdownloader through gluetun.
+# VPN overlay: routes jdownloader through gluetun (PIA).
 # Usage:
 #   docker compose -f docker-compose.yml -f docker-compose.vpn.yml --profile vpn up -d
 services:
@@ -9,6 +9,15 @@ services:
         condition: service_healthy
     ports: []
 
-  orchestrator:
+  gluetun:
     ports:
-      - "${DASHBOARD_PORT:-8080}:8080"
+      - "${JD2_WEBUI_PORT:-5800}:5800"
+      - "${JD2_API_PORT:-3128}:3128"
+    environment:
+      SERVER_REGIONS: ${PIA_SERVER_REGIONS:-${PIA_SERVER_REGION:-Netherlands}}
+      HTTP_CONTROL_SERVER_ADDRESS: :8000
+      FIREWALL_OUTBOUND_SUBNETS: ${VPN_LAN_SUBNET:-172.16.0.0/12}
+
+  orchestrator:
+    environment:
+      JD2_HOST: gluetun
