@@ -87,11 +87,17 @@ def run_orchestrator(settings: Settings | None = None) -> None:
     settings.ensure_dirs()
     setup_logging("orchestrator", settings.log_dir, settings.log_level)
 
-    from migradora.jd2_config import ensure_remote_api_enabled, jd2_initialized
+    from migradora.jd2_config import (
+        ensure_general_settings,
+        ensure_remote_api_enabled,
+        jd2_initialized,
+    )
     if jd2_initialized("/jd2-config"):
-        if ensure_remote_api_enabled("/jd2-config", "/templates"):
+        jd2_changed = ensure_remote_api_enabled("/jd2-config", "/templates")
+        jd2_changed = ensure_general_settings("/jd2-config", "/output", "/templates") or jd2_changed
+        if jd2_changed:
             logger.warning(
-                "JD2 Remote API config was updated — restart jdownloader: "
+                "JD2 config was updated — restart jdownloader: "
                 "docker compose restart jdownloader"
             )
     else:

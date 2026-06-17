@@ -8,6 +8,8 @@ CFG_DIR="data/jd2/config/cfg"
 GUI="$CFG_DIR/org.jdownloader.settings.GraphicalUserInterfaceSettings.json"
 API="$CFG_DIR/org.jdownloader.api.RemoteAPIConfig.json"
 TEMPLATE="jd2/config-templates/org.jdownloader.api.RemoteAPIConfig.json"
+GENERAL_TEMPLATE="jd2/config-templates/org.jdownloader.settings.GeneralSettings.json"
+GENERAL="$CFG_DIR/org.jdownloader.settings.GeneralSettings.json"
 
 if [ ! -f "$GUI" ]; then
   echo "ERROR: JD2 has not finished first-run initialization."
@@ -33,7 +35,20 @@ else
 EOF
 fi
 
+if [ -f "$GENERAL_TEMPLATE" ]; then
+  cp "$GENERAL_TEMPLATE" "$GENERAL"
+else
+  cat > "$GENERAL" <<'EOF'
+{
+  "defaultdownloadfolder": "/output",
+  "maxsimultaneousdownloads": 1,
+  "maxsimultanedownloadsperhost": 1
+}
+EOF
+fi
+
 echo "Wrote $API"
+echo "Wrote $GENERAL"
 echo "Restart jdownloader for API to listen on port 3128:"
 echo "  docker compose restart jdownloader"
 echo "Then verify:"

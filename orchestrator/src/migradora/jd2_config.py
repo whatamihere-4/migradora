@@ -11,11 +11,18 @@ logger = logging.getLogger("migradora.jd2_config")
 
 REMOTE_API_FILENAME = "org.jdownloader.api.RemoteAPIConfig.json"
 GUI_SETTINGS_FILENAME = "org.jdownloader.settings.GraphicalUserInterfaceSettings.json"
+GENERAL_SETTINGS_FILENAME = "org.jdownloader.settings.GeneralSettings.json"
 
 DEFAULT_REMOTE_API = {
     "deprecatedapienabled": True,
     "deprecatedapilocalhostonly": False,
     "port": 3128,
+}
+
+DEFAULT_GENERAL_SETTINGS = {
+    "defaultdownloadfolder": "/output",
+    "maxsimultaneousdownloads": 1,
+    "maxsimultanedownloadsperhost": 1,
 }
 
 
@@ -66,6 +73,48 @@ def ensure_remote_api_enabled(
         if merged != current:
             api_path.write_text(json.dumps(merged, indent=2))
             logger.info("Updated JD2 Remote API config at %s", api_path)
+            changed = True
+
+    return changed
+
+
+def ensure_general_settings(
+    config_root: str | Path,
+    download_dir: str = "/output",
+    template_dir: str | Path = "/templates",
+) -> bool:
+    """Ensure JD2 default download folder matches the container /output mount."""
+    config_root = Path(config_root)
+    cfg = config_root / "cfg"
+    settings_path = cfg / GENERAL_SETTINGS_FILENAME
+    template_path = Path(template_dir) / GENERAL_SETTINGS_FILENAME
+
+    if not jd2_initialized(config_root):
+        return False
+
+    desired = {**DEFAULT_GENERAL_SETTINGS, "defaultdownloadfolder": download_dir}
+    if template_path.is_file():
+        try:
+            desired.update(json.loads(template_path.read_text()))
+        except json.JSONDecodeError:
+            pass
+    desired["defaultdownloadfolder"] = download_dir
+
+    changed = False
+    if not settings_path.is_file():
+        cfg.mkdir(parents=True, exist_ok=True)
+        settings_path.write_text(json.dumps(desired, indent=2))
+        logger.info("Created JD2 GeneralSettings at %s", settings_path)
+        changed = True
+    else:
+        try:
+            current = json.loads(settings_path.read_text())
+        except json.JSONDecodeError:
+            current = {}
+        merged = {**current, **desired}
+        if merged != current:
+            settings_path.write_text(json.dumps(merged, indent=2))
+            logger.info("Updated JD2 default download folder to %s", download_dir)
             changed = True
 
     return changed

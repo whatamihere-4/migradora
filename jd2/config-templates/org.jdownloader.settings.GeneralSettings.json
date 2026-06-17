@@ -1,0 +1,5 @@
+{
+  "defaultdownloadfolder": "/output",
+  "maxsimultaneousdownloads": 1,
+  "maxsimultanedownloadsperhost": 1
+}

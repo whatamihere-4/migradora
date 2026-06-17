@@ -68,7 +68,7 @@ class Settings:
     # JDownloader2 (local Deprecated API)
     jd2_host: str = "jdownloader"
     jd2_port: int = 3128
-    jd2_download_dir: str = "/data/downloads"
+    jd2_download_dir: str = "/output"
     jd2_api_timeout_sec: float = 30.0
     jd2_poll_interval_sec: float = 5.0
     jd2_crawl_timeout_sec: int = 600
@@ -134,7 +134,7 @@ class Settings:
             filester_storage_pause_pct=float(_env("FILESTER_STORAGE_PAUSE_PCT", "95")),
             jd2_host=_env("JD2_HOST", "jdownloader"),
             jd2_port=_env_int("JD2_PORT", 3128),
-            jd2_download_dir=_env("JD2_DOWNLOAD_DIR", "/data/downloads"),
+            jd2_download_dir=_env("JD2_DOWNLOAD_DIR", "/output"),
             jd2_api_timeout_sec=float(_env("JD2_API_TIMEOUT_SEC", "30")),
             jd2_poll_interval_sec=float(_env("JD2_POLL_INTERVAL_SEC", "5")),
             jd2_crawl_timeout_sec=_env_int("JD2_CRAWL_TIMEOUT_SEC", 600),

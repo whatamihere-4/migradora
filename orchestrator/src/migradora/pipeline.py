@@ -167,8 +167,19 @@ class PipelineCoordinator:
 
         pkg_name = f"migradora-{job.id}"
         local_dest = Path(self.settings.download_dir) / str(job.id)
-        jd2_dest = f"{self.settings.jd2_download_dir}/{job.id}"
-        local_dest.mkdir(parents=True, exist_ok=True)
+        jd2_dest = f"{self.settings.jd2_download_dir.rstrip('/')}/{job.id}"
+        # Shared volume: orchestrator must not create root-only dirs JD2 cannot write.
+        if local_dest.exists():
+            try:
+                local_dest.chmod(0o777)
+            except OSError:
+                pass
+        else:
+            local_dest.mkdir(parents=True, exist_ok=True)
+            try:
+                local_dest.chmod(0o777)
+            except OSError:
+                pass
 
         self._current_phase = "downloading"
         self.queue.update_file(job.id, jd2_package_name=pkg_name)

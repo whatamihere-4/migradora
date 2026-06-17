@@ -87,6 +87,16 @@ def _as_dict(result: Any) -> dict[str, Any]:
     return data if isinstance(data, dict) else {}
 
 
+def _link_failed(link: dict[str, Any]) -> str | None:
+    status = str(link.get("status") or "").lower()
+    if not status:
+        return None
+    markers = ("invalid", "error", "failed", "offline", "blocked", "unavailable")
+    if any(marker in status for marker in markers):
+        return str(link.get("status"))
+    return None
+
+
 class JDownloaderClient:
     def __init__(
         self,
@@ -276,6 +286,7 @@ class JDownloaderClient:
         timeout_sec: int = 86400,
     ) -> list[dict[str, Any]]:
         deadline = time.time() + timeout_sec
+        stalled = 0
         while time.time() < deadline:
             packages = self.query_download_packages(package_name=package_name)
             if not packages:
@@ -288,22 +299,28 @@ class JDownloaderClient:
                 if pkg_uuid is not None
                 else []
             )
-            if links and all(link.get("finished") for link in links):
-                failed = [
-                    link
-                    for link in links
-                    if link.get("status") and "failed" in str(link.get("status")).lower()
-                ]
+            if links:
+                failed = [reason for link in links if (reason := _link_failed(link))]
                 if failed:
                     raise RuntimeError(
-                        f"JD2 download failed for package {package_name}: {failed}"
+                        f"JD2 download failed for package {package_name}: {failed[0]}"
                     )
+            if links and all(link.get("finished") for link in links):
                 logger.info("JD2 package finished: %s (%d links)", package_name, len(links))
                 return links
             running = [link for link in links if not link.get("finished")]
             if running:
                 loaded = sum(int(link.get("bytesLoaded") or 0) for link in links)
                 total = sum(int(link.get("bytesTotal") or 0) for link in links) or 1
+                if loaded == 0:
+                    stalled += 1
+                    if stalled >= 12:
+                        statuses = [link.get("status") for link in links]
+                        raise RuntimeError(
+                            f"JD2 download stalled at 0% for {package_name}: {statuses}"
+                        )
+                else:
+                    stalled = 0
                 logger.info(
                     "JD2 downloading %s: %.1f%%",
                     package_name,

@@ -192,6 +192,7 @@ cat video.part*.mp4 > video.mp4
 | Discover finds 0 files / crawl timeout | Rebuild orchestrator after updates; confirm folder expands in JD2 web UI (:5800) |
 | Pipeline stuck on downloading | Gofile IP/traffic block — enable VPN, run `./scripts/vpn-rotate.sh`, resume |
 | `paused_traffic` / 222 GB message | Stale pause from old account monitor — `python -m migradora resume`; use VPN for IP blocks |
+| JD2 `Invalid download directory` / stuck at 0% | Run `./scripts/jd2-fix-download-dir.sh`, restart jdownloader, delete failed package in web UI, `resume` |
 | Queue paused (storage) | Free Filester account space |
 
 ## License
