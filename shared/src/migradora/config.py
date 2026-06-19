@@ -71,6 +71,7 @@ class Settings:
     jd2_download_dir: str = "/output"
     jd2_api_timeout_sec: float = 30.0
     jd2_poll_interval_sec: float = 5.0
+    jd2_startup_wait_sec: float = 180.0
     jd2_crawl_timeout_sec: int = 600
 
     # Filester storage guard
@@ -137,6 +138,7 @@ class Settings:
             jd2_download_dir=_env("JD2_DOWNLOAD_DIR", "/output"),
             jd2_api_timeout_sec=float(_env("JD2_API_TIMEOUT_SEC", "30")),
             jd2_poll_interval_sec=float(_env("JD2_POLL_INTERVAL_SEC", "5")),
+            jd2_startup_wait_sec=float(_env("JD2_STARTUP_WAIT_SEC", "180")),
             jd2_crawl_timeout_sec=_env_int("JD2_CRAWL_TIMEOUT_SEC", 600),
             vpn_enabled=_env_bool("VPN_ENABLED", False),
             pia_openvpn_user=_env("PIA_OPENVPN_USER"),
@@ -161,4 +163,3 @@ class Settings:
     def ensure_dirs(self) -> None:
         for path in (self.download_dir, self.state_dir, self.log_dir):
             Path(path).mkdir(parents=True, exist_ok=True)
-        Path(self.jd2_download_dir).mkdir(parents=True, exist_ok=True)

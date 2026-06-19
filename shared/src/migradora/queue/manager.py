@@ -226,6 +226,16 @@ class QueueManager:
                     (FileStatus.FAILED.value, error, utc_now(), file_id),
                 )
 
+    def requeue_job(self, file_id: int, error: str) -> None:
+        """Return job to pending without counting the failed attempt."""
+        with self.connection() as conn:
+            conn.execute(
+                """UPDATE files SET status=?, last_error=?,
+                   attempts=CASE WHEN attempts > 0 THEN attempts - 1 ELSE 0 END,
+                   updated_at=? WHERE id=?""",
+                (FileStatus.PENDING.value, error, utc_now(), file_id),
+            )
+
     def reset_failed_jobs(self) -> int:
         """Move failed jobs back to pending (clears attempts and last_error)."""
         with self.connection() as conn:

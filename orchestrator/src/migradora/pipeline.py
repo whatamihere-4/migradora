@@ -8,6 +8,8 @@ import threading
 import time
 from pathlib import Path
 
+import httpx
+
 from migradora.config import Settings
 from migradora.filester_client import FilesterClient
 from migradora.jdownloader.client import JDownloaderClient, _as_int_list
@@ -18,6 +20,15 @@ from migradora.utils import free_disk_gb
 from migradora.vpn import is_gofile_traffic_block, rotate_vpn
 
 logger = logging.getLogger("migradora.pipeline")
+
+
+def _is_transient_jd2_error(exc: BaseException) -> bool:
+    if isinstance(exc, (httpx.ConnectError, httpx.ConnectTimeout, TimeoutError)):
+        return True
+    if isinstance(exc, OSError) and getattr(exc, "errno", None) in (111, 113):
+        return True
+    msg = str(exc).lower()
+    return "connection refused" in msg or "connect error" in msg
 
 
 def write_heartbeat(state_dir: str) -> None:
@@ -123,6 +134,7 @@ class PipelineCoordinator:
 
     def run_loop(self) -> None:
         logger.info("Pipeline coordinator started")
+        jd2_ready = False
         while not self._stop.is_set():
             write_heartbeat(self.settings.state_dir)
             self.queue.reset_stale_jobs(self.settings.stale_job_timeout_sec)
@@ -132,6 +144,25 @@ class PipelineCoordinator:
                 self._current_phase = f"paused:{state.value}"
                 time.sleep(self.settings.worker_poll_interval_sec)
                 continue
+
+            if not jd2_ready:
+                self._current_phase = "waiting:jd2"
+                try:
+                    with JDownloaderClient(
+                        host=self.settings.jd2_host,
+                        port=self.settings.jd2_port,
+                        timeout_sec=self.settings.jd2_api_timeout_sec,
+                    ) as jd2:
+                        jd2.wait_until_healthy(
+                            timeout_sec=self.settings.jd2_startup_wait_sec,
+                            interval_sec=self.settings.jd2_poll_interval_sec,
+                        )
+                    jd2_ready = True
+                    logger.info("JDownloader API ready at %s:%d", self.settings.jd2_host, self.settings.jd2_port)
+                except TimeoutError as exc:
+                    logger.warning("%s — retrying", exc)
+                    time.sleep(self.settings.worker_poll_interval_sec)
+                    continue
 
             if free_disk_gb(self.settings.download_dir) < self.settings.min_free_disk_gb:
                 self.queue.set_queue_state(
@@ -154,6 +185,12 @@ class PipelineCoordinator:
                 logger.error("Pipeline failed for job %d: %s", job.id, exc)
                 if is_gofile_traffic_block(str(exc)):
                     self._handle_gofile_traffic_block(job.id, str(exc))
+                    continue
+                if _is_transient_jd2_error(exc):
+                    logger.warning("Transient JD2 error for job %d, requeueing", job.id)
+                    self.queue.requeue_job(job.id, str(exc))
+                    jd2_ready = False
+                    time.sleep(self.settings.download_retry_delay_sec)
                     continue
                 if job.attempts >= self.settings.download_max_retries:
                     self.queue.mark_failed(job.id, str(exc), retry=False)
@@ -181,6 +218,10 @@ class PipelineCoordinator:
             timeout_sec=self.settings.jd2_api_timeout_sec,
             poll_interval_sec=self.settings.jd2_poll_interval_sec,
         ) as jd2:
+            jd2.wait_until_healthy(
+                timeout_sec=min(60.0, self.settings.jd2_startup_wait_sec),
+                interval_sec=self.settings.jd2_poll_interval_sec,
+            )
             try:
                 stale = jd2.query_download_packages(package_name=pkg_name)
                 stale_ids = _as_int_list([p.get("uuid") for p in stale])

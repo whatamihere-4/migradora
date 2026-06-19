@@ -152,6 +152,21 @@ class JDownloaderClient:
             logger.debug("JD2 health check failed: %s", exc)
             return False
 
+    def wait_until_healthy(
+        self,
+        timeout_sec: float = 180.0,
+        interval_sec: float = 5.0,
+    ) -> None:
+        """Block until JD2 Deprecated API responds (startup can take 1–3 min)."""
+        deadline = time.time() + timeout_sec
+        while time.time() < deadline:
+            if self.health():
+                return
+            time.sleep(interval_sec)
+        raise TimeoutError(
+            f"JDownloader API at {self.base_url} not ready after {timeout_sec:.0f}s"
+        )
+
     def is_collecting(self) -> bool:
         result = self._get("/linkgrabberv2/isCollecting")
         return bool(_unwrap_data(result))

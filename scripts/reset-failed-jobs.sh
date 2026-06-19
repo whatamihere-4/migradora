@@ -1,5 +1,5 @@
 #!/bin/sh
-# Reset failed queue jobs to pending (no sqlite3 CLI required).
+# Reset failed/stuck queue jobs to pending (no sqlite3 CLI required).
 set -e
 cd "$(dirname "$0")/.."
 docker compose exec -T orchestrator python -c "
@@ -8,9 +8,10 @@ from pathlib import Path
 db = Path('/data/state/queue.db')
 conn = sqlite3.connect(db)
 cur = conn.execute(
-    \"UPDATE files SET status='pending', attempts=0, last_error=NULL WHERE status='failed' AND is_part=0\"
+    \"\"\"UPDATE files SET status='pending', attempts=0, last_error=NULL
+       WHERE is_part=0 AND status IN ('failed', 'downloading')\"\"\"
 )
 conn.execute(\"UPDATE queue_control SET state='running', pause_reason='' WHERE id=1\")
 conn.commit()
-print(f'Reset {cur.rowcount} failed job(s) to pending')
+print(f'Reset {cur.rowcount} job(s) to pending')
 "
