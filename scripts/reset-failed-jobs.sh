@@ -2,7 +2,13 @@
 # Reset failed/stuck queue jobs to pending (no sqlite3 CLI required).
 set -e
 cd "$(dirname "$0")/.."
-docker compose exec -T orchestrator python -c "
+
+COMPOSE="docker compose"
+if [ -f docker-compose.vpn.yml ] && docker compose -f docker-compose.yml -f docker-compose.vpn.yml --profile vpn ps -q gluetun 2>/dev/null | grep -q .; then
+  COMPOSE="docker compose -f docker-compose.yml -f docker-compose.vpn.yml --profile vpn"
+fi
+
+$COMPOSE exec -T orchestrator python -c "
 import sqlite3
 from pathlib import Path
 db = Path('/data/state/queue.db')

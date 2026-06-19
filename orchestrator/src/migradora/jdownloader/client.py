@@ -17,7 +17,11 @@ _LINKGRABBER_LINK_FIELDS: dict[str, Any] = {
     "status": True,
     "availability": True,
     "enabled": True,
+    "packageUUID": True,
+    "name": True,
 }
+
+_URL_DISPLAY_TYPES = ("CUSTOM", "CONTAINER", "FORUM", "ORIGIN", "RAW", "REFERRER")
 
 _LINKGRABBER_PACKAGE_FIELDS: dict[str, Any] = {
     "childCount": True,
@@ -343,11 +347,18 @@ class JDownloaderClient:
         packages = package_ids or []
         if not links and not packages:
             return
-        # JD2 expects [linkIds, packageIds]; use [0] when removing by package only.
-        self._post_action(
-            "/linkgrabberv2/removeLinks",
-            links if links else [0],
-            packages,
+        if links:
+            if self._post_action_best_effort(
+                "/linkgrabberv2/removeLinks", links, packages
+            ):
+                return
+        for link_arg in ([0], []):
+            if self._post_action_best_effort(
+                "/linkgrabberv2/removeLinks", link_arg, packages
+            ):
+                return
+        raise RuntimeError(
+            f"JD2 linkgrabber removeLinks failed for links={links} packages={packages}"
         )
 
     def remove_downloads(
@@ -501,26 +512,24 @@ class JDownloaderClient:
         self,
         link_ids: list[int] | None = None,
         package_ids: list[int] | None = None,
-    ) -> None:
+    ) -> bool:
         links = link_ids or []
         packages = package_ids or []
         if not links and not packages:
-            return
-        if links and self._post_action_best_effort(
-            "/linkgrabberv2/moveToDownloadlist", links, []
-        ):
-            return
-        if packages and self._post_action_best_effort(
-            "/linkgrabberv2/moveToDownloadlist", [], packages
-        ):
-            return
-        if links and packages and self._post_action_best_effort(
-            "/linkgrabberv2/moveToDownloadlist", links, packages
-        ):
-            return
-        raise RuntimeError(
-            f"JD2 moveToDownloadlist failed for links={links} packages={packages}"
-        )
+            return False
+        attempts: list[tuple[list[int], list[int]]] = []
+        if links and packages:
+            attempts.append((links, packages))
+        if links:
+            attempts.append((links, []))
+        if packages:
+            attempts.append(([], packages))
+        for link_arg, pkg_arg in attempts:
+            if self._post_action_best_effort(
+                "/linkgrabberv2/moveToDownloadlist", link_arg, pkg_arg
+            ):
+                return True
+        return False
 
     def force_download(
         self,
@@ -561,6 +570,92 @@ class JDownloaderClient:
             self.get_download_state(),
         )
 
+    def _get_direct_download_url(self, link_id: int) -> str | None:
+        for display in _URL_DISPLAY_TYPES:
+            try:
+                result = self._post_action(
+                    "/linkgrabberv2/getDownloadUrls",
+                    [link_id],
+                    [],
+                    [display],
+                )
+            except Exception as exc:
+                logger.debug("JD2 getDownloadUrls(%s) failed: %s", display, exc)
+                continue
+            data = _unwrap_data(result)
+            if not isinstance(data, dict):
+                continue
+            for candidate in data.keys():
+                if candidate.startswith("http"):
+                    logger.info("JD2 resolved direct URL via %s", display)
+                    return candidate
+        return None
+
+    def _promote_wanted_link(
+        self,
+        wanted_link: dict[str, Any],
+        package_name: str,
+        destination_folder: str,
+    ) -> bool:
+        link_id = _as_int(wanted_link.get("uuid"))
+        src_pkg = _as_int(wanted_link.get("packageUUID"))
+        if link_id is None:
+            return False
+
+        if link_id and src_pkg and self._post_action_best_effort(
+            "/linkgrabberv2/movetoNewPackage",
+            [link_id],
+            [src_pkg],
+            package_name,
+            destination_folder,
+        ):
+            new_pkgs = self.query_linkgrabber_packages(package_name=package_name)
+            new_ids = _as_int_list([p.get("uuid") for p in new_pkgs])
+            if new_ids and self.move_to_downloadlist(package_ids=new_ids):
+                logger.info("JD2 promoted %s via movetoNewPackage", package_name)
+                return True
+
+        if self.move_to_downloadlist(
+            link_ids=[link_id],
+            package_ids=[src_pkg] if src_pkg else None,
+        ):
+            logger.info("JD2 promoted %s via moveToDownloadlist", package_name)
+            return True
+
+        if src_pkg and self.move_to_downloadlist(package_ids=[src_pkg]):
+            pkg_links = self.query_linkgrabber_links(package_uuids=[src_pkg])
+            if len(pkg_links) <= 1:
+                logger.info("JD2 promoted %s via whole package", package_name)
+                return True
+
+        return False
+
+    def _add_direct_download(
+        self,
+        wanted_link: dict[str, Any],
+        package_name: str,
+        destination_folder: str,
+        *,
+        download_password: str = "",
+    ) -> None:
+        link_id = _as_int(wanted_link.get("uuid"))
+        if link_id is None:
+            raise RuntimeError(f"No link id to resolve direct URL for {package_name}")
+        direct = self._get_direct_download_url(link_id)
+        if not direct:
+            raise RuntimeError(
+                f"JD2 could not resolve a direct download URL for {package_name}"
+            )
+        self.clear_package(package_name)
+        self.add_links(
+            direct,
+            package_name=package_name,
+            destination_folder=destination_folder,
+            autostart=True,
+            download_password=download_password,
+        )
+        logger.info("JD2 added direct URL for %s (single HTTP link)", package_name)
+
     def _prune_linkgrabber_links(
         self,
         keep_links: list[dict[str, Any]],
@@ -576,44 +671,24 @@ class JDownloaderClient:
             for link in all_links
             if (uid := _as_int(link.get("uuid"))) is not None and uid not in keep_ids
         ]
-        if drop_ids:
-            try:
-                self.remove_linkgrabber(link_ids=drop_ids)
-                logger.info("JD2 removed %d extra linkgrabber link(s)", len(drop_ids))
-            except Exception as exc:
-                logger.warning("JD2 prune linkgrabber failed: %s", exc)
+        if not drop_ids:
+            return
+        try:
+            self.remove_linkgrabber(link_ids=drop_ids)
+            logger.info("JD2 removed %d extra linkgrabber link(s)", len(drop_ids))
+        except Exception as exc:
+            logger.warning("JD2 prune linkgrabber failed (will use direct URL): %s", exc)
 
     def _wait_for_download_package(
         self,
         package_name: str,
-        wanted_links: list[dict[str, Any]],
         timeout_sec: float = 120.0,
     ) -> list[dict[str, Any]]:
         deadline = time.time() + timeout_sec
-        link_ids = _as_int_list([link.get("uuid") for link in wanted_links])
         while time.time() < deadline:
             packages = self.query_download_packages(package_name=package_name)
             if packages:
-                pkg_uuid = _as_int(packages[0].get("uuid"))
-                if pkg_uuid is not None:
-                    dl_links = self.query_download_links(package_uuids=[pkg_uuid])
-                    kept = self._prune_download_links(wanted_links, dl_links)
-                    if kept:
-                        return packages
                 return packages
-            if link_ids:
-                try:
-                    self.move_to_downloadlist(link_ids=link_ids)
-                except Exception as exc:
-                    logger.debug("JD2 promote %s by link: %s", package_name, exc)
-            else:
-                lg_packages = self.query_linkgrabber_packages(package_name=package_name)
-                pkg_ids = _as_int_list([p.get("uuid") for p in lg_packages])
-                if pkg_ids:
-                    try:
-                        self.move_to_downloadlist(package_ids=pkg_ids)
-                    except Exception as exc:
-                        logger.debug("JD2 promote %s by package: %s", package_name, exc)
             time.sleep(self.poll_interval_sec)
         return []
 
@@ -654,29 +729,54 @@ class JDownloaderClient:
             raise RuntimeError(
                 f"JD2 crawl for {package_name} matched 0 links for {url[:80]}"
             )
+        wanted_link = wanted[0]
         logger.info(
-            "JD2 linkgrabber ready: %s (%d crawled, %d wanted)",
+            "JD2 linkgrabber ready: %s (%d crawled, 1 wanted: %s)",
             package_name,
             len(links),
-            len(wanted),
+            (wanted_link.get("name") or wanted_link.get("url") or "")[:60],
         )
         if len(wanted) < len(links):
             self._prune_linkgrabber_links(wanted, links)
 
-        packages = self._wait_for_download_package(package_name, wanted)
+        promoted = self._promote_wanted_link(
+            wanted_link, package_name, destination_folder
+        )
+        if not promoted:
+            logger.warning(
+                "JD2 moveToDownloadlist failed for %s — using direct URL fallback",
+                package_name,
+            )
+            self._add_direct_download(
+                wanted_link,
+                package_name,
+                destination_folder,
+                download_password=download_password,
+            )
+
+        packages = self._wait_for_download_package(package_name)
         if not packages:
             raise RuntimeError(
                 f"JD2 package {package_name} never reached the download list"
             )
 
+        pkg_uuid = _as_int(packages[0].get("uuid"))
+        if pkg_uuid is not None:
+            dl_links = self.query_download_links(package_uuids=[pkg_uuid])
+            kept = self._prune_download_links(wanted, dl_links)
+            if not kept and len(dl_links) > 1:
+                raise RuntimeError(
+                    f"JD2 package {package_name} has {len(dl_links)} links after promote"
+                )
+
         self.ensure_downloads_running()
-        link_ids = _as_int_list([link.get("uuid") for link in wanted])
-        if link_ids:
-            self.force_download(link_ids=link_ids)
-        else:
-            pkg_ids = _as_int_list([p.get("uuid") for p in packages])
-            if pkg_ids:
-                self.force_download(package_ids=pkg_ids)
+        if pkg_uuid is not None:
+            dl_links = self.query_download_links(package_uuids=[pkg_uuid])
+            link_ids = _as_int_list([link.get("uuid") for link in dl_links])
+            if link_ids:
+                self.force_download(link_ids=link_ids)
+            else:
+                self.force_download(package_ids=[pkg_uuid])
 
     def wait_until_package_finished(
         self,
@@ -701,9 +801,26 @@ class JDownloaderClient:
                         package_name,
                     )
                     try:
-                        self.move_to_downloadlist(package_ids=pkg_ids)
+                        moved = self.move_to_downloadlist(package_ids=pkg_ids)
                     except Exception as exc:
                         logger.warning("JD2 promote failed: %s", exc)
+                        moved = False
+                    if not moved:
+                        lg_links = self.query_linkgrabber_links(package_uuids=pkg_ids)
+                        if lg_links:
+                            if url:
+                                filtered = filter_links_for_url(
+                                    url, lg_links, expected_size=expected_size
+                                )
+                                target = filtered[0] if filtered else lg_links[0]
+                            else:
+                                target = lg_links[0]
+                            dest = str(lg_packages[0].get("saveTo") or "/output")
+                            self._add_direct_download(
+                                target,
+                                package_name,
+                                dest,
+                            )
                     self.ensure_downloads_running()
                     self.force_download(package_ids=pkg_ids)
                 missing_pkg_polls += 1
