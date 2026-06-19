@@ -1,4 +1,4 @@
-"""Serial pipeline: JD2 download -> split -> Filester upload -> cleanup."""
+"""Serial pipeline: Gofile download -> split -> Filester upload -> cleanup."""
 
 from __future__ import annotations
 
@@ -8,53 +8,19 @@ import threading
 import time
 from pathlib import Path
 
-import httpx
-
 from migradora.config import Settings
 from migradora.filester_client import FilesterClient
 from migradora.gofile_client import GofileClient
-from migradora.jdownloader.client import JDownloaderClient, _as_int_list
 from migradora.models import FileStatus, QueueState
 from migradora.queue.manager import QueueManager
 from migradora.splitter import split_file
 from migradora.utils import free_disk_gb
-from migradora.vpn import is_gofile_traffic_block, rotate_vpn
 
 logger = logging.getLogger("migradora.pipeline")
 
 
-def _is_transient_jd2_error(exc: BaseException) -> bool:
-    if isinstance(exc, (httpx.ConnectError, httpx.ConnectTimeout, TimeoutError)):
-        return True
-    if isinstance(exc, OSError) and getattr(exc, "errno", None) in (111, 113):
-        return True
-    msg = str(exc).lower()
-    return "connection refused" in msg or "connect error" in msg
-
-
 def write_heartbeat(state_dir: str) -> None:
     Path(state_dir, "pipeline.heartbeat").write_text(str(time.time()))
-
-
-def find_completed_file(dest_dir: Path, stable_sec: float = 3.0) -> Path:
-    """Return largest stable file under dest_dir (searches subdirs). No .part files."""
-    if not dest_dir.is_dir():
-        raise FileNotFoundError(f"Download directory missing: {dest_dir}")
-    candidates = [
-        p for p in dest_dir.rglob("*")
-        if p.is_file() and not p.name.endswith(".part")
-    ]
-    if not candidates:
-        raise FileNotFoundError(f"No completed file in {dest_dir}")
-    # Prefer largest file (main download)
-    candidates.sort(key=lambda p: p.stat().st_size, reverse=True)
-    path = candidates[0]
-    size1 = path.stat().st_size
-    time.sleep(stable_sec)
-    size2 = path.stat().st_size
-    if size1 != size2:
-        raise RuntimeError(f"File still growing: {path}")
-    return path
 
 
 def cleanup_dir(path: Path) -> None:
@@ -108,62 +74,17 @@ class PipelineCoordinator:
     def stop(self) -> None:
         self._stop.set()
 
-    def _handle_gofile_traffic_block(self, job_id: int, message: str) -> None:
-        logger.warning("Gofile traffic/IP block detected for job %d: %s", job_id, message)
-        self.queue.mark_failed(job_id, message, retry=True)
-
-        if self.settings.vpn_enabled and self.settings.vpn_rotate_on_ban:
-            try:
-                result = rotate_vpn(self.settings.gluetun_control_url)
-                logger.info(
-                    "VPN rotated after Gofile block (%s -> %s)",
-                    result.get("ip_before"),
-                    result.get("ip_after"),
-                )
-                self.queue.set_queue_state(
-                    QueueState.RUNNING,
-                    "VPN rotated after Gofile traffic block",
-                )
-                return
-            except Exception as exc:
-                logger.error("VPN rotate failed: %s", exc)
-
-        self.queue.set_queue_state(
-            QueueState.PAUSED_TRAFFIC,
-            f"Gofile traffic/IP block — rotate VPN then resume: {message[:200]}",
-        )
-
     def run_loop(self) -> None:
-        logger.info("Pipeline coordinator started")
-        jd2_ready = False
+        logger.info("Pipeline started")
         while not self._stop.is_set():
             write_heartbeat(self.settings.state_dir)
             self.queue.reset_stale_jobs(self.settings.stale_job_timeout_sec)
 
-            state, reason = self.queue.get_queue_state()
+            state, _ = self.queue.get_queue_state()
             if state != QueueState.RUNNING:
                 self._current_phase = f"paused:{state.value}"
                 time.sleep(self.settings.worker_poll_interval_sec)
                 continue
-
-            if not jd2_ready:
-                self._current_phase = "waiting:jd2"
-                try:
-                    with JDownloaderClient(
-                        host=self.settings.jd2_host,
-                        port=self.settings.jd2_port,
-                        timeout_sec=self.settings.jd2_api_timeout_sec,
-                    ) as jd2:
-                        jd2.wait_until_healthy(
-                            timeout_sec=self.settings.jd2_startup_wait_sec,
-                            interval_sec=self.settings.jd2_poll_interval_sec,
-                        )
-                    jd2_ready = True
-                    logger.info("JDownloader API ready at %s:%d", self.settings.jd2_host, self.settings.jd2_port)
-                except TimeoutError as exc:
-                    logger.warning("%s — retrying", exc)
-                    time.sleep(self.settings.worker_poll_interval_sec)
-                    continue
 
             if free_disk_gb(self.settings.download_dir) < self.settings.min_free_disk_gb:
                 self.queue.set_queue_state(
@@ -184,49 +105,43 @@ class PipelineCoordinator:
                 self._process_job(job)
             except Exception as exc:
                 logger.error("Pipeline failed for job %d: %s", job.id, exc)
-                if is_gofile_traffic_block(str(exc)):
-                    self._handle_gofile_traffic_block(job.id, str(exc))
-                    continue
-                if _is_transient_jd2_error(exc):
-                    logger.warning("Transient JD2 error for job %d, requeueing", job.id)
-                    self.queue.requeue_job(job.id, str(exc))
-                    jd2_ready = False
-                    time.sleep(self.settings.download_retry_delay_sec)
-                    continue
                 if job.attempts >= self.settings.download_max_retries:
                     self.queue.mark_failed(job.id, str(exc), retry=False)
                 else:
                     self.queue.mark_failed(job.id, str(exc), retry=True)
+                    time.sleep(self.settings.download_retry_delay_sec)
 
-        logger.info("Pipeline coordinator stopped")
+        logger.info("Pipeline stopped")
 
     def _process_job(self, job) -> None:
         url = job.gofile_url or job.download_link
         if not url:
             raise RuntimeError(f"Job {job.id} has no gofile_url")
 
-        pkg_name = f"migradora-{job.id}"
-        # JD2 (UID 1000) must create dirs under /output — do not mkdir from orchestrator (root).
-        jd2_dest = self.settings.jd2_download_dir.rstrip("/")
-        local_dest = Path(self.settings.download_dir) / pkg_name
+        job_dir = Path(self.settings.download_dir) / f"job-{job.id}"
+        job_dir.mkdir(parents=True, exist_ok=True)
 
         self._current_phase = "downloading"
-        self.queue.update_file(job.id, jd2_package_name=pkg_name)
+        with GofileClient(
+            token=self.settings.gofile_token,
+            password=self.settings.gofile_password,
+        ) as gofile:
+            dest = gofile.safe_dest_path(job_dir, job.filename)
+            gofile.download_file(
+                url,
+                str(dest),
+                expected_size=job.size_bytes or None,
+                throttle_kbps=self.settings.download_throttle_kbps,
+            )
 
-        backend = self.settings.download_backend
-        if backend in ("gofile-direct", "jd2-direct"):
-            self._download_via_gofile_direct(job, url, pkg_name, jd2_dest, local_dest)
-        elif backend == "direct":
-            self._download_via_http(job, url, local_dest)
-        else:
-            self._download_via_jd2_gofile(job, url, pkg_name, jd2_dest)
-
-        local_path = find_completed_file(local_dest)
+        local_path = dest
         actual_size = local_path.stat().st_size
         if job.size_bytes and actual_size != job.size_bytes:
             logger.warning(
                 "Size mismatch job %d: expected %d, got %d",
-                job.id, job.size_bytes, actual_size,
+                job.id,
+                job.size_bytes,
+                actual_size,
             )
 
         self.queue.update_file(
@@ -238,7 +153,7 @@ class PipelineCoordinator:
         self._current_phase = "uploading"
         parts = split_file(
             local_path,
-            local_dest,
+            job_dir,
             self.settings.filester_max_file_bytes,
             base_name=local_path.stem,
         )
@@ -266,19 +181,7 @@ class PipelineCoordinator:
                 cleanup_dir(part_path)
                 logger.info("Uploaded -> https://filester.me/d/%s", slug)
 
-        cleanup_dir(local_dest)
-        try:
-            jd2_pkg_cleanup = JDownloaderClient(
-                host=self.settings.jd2_host,
-                port=self.settings.jd2_port,
-            )
-            packages = jd2_pkg_cleanup.query_download_packages(package_name=pkg_name)
-            pkg_ids = _as_int_list([p.get("uuid") for p in packages])
-            jd2_pkg_cleanup.remove_downloads(package_ids=pkg_ids)
-            jd2_pkg_cleanup.close()
-        except Exception as exc:
-            logger.warning("JD2 cleanup failed for %s: %s", pkg_name, exc)
-
+        cleanup_dir(job_dir)
         self.queue.update_file(
             job.id,
             status=FileStatus.UPLOADED,
@@ -288,72 +191,3 @@ class PipelineCoordinator:
         self._current_phase = "idle"
         self._current_job_id = None
         logger.info("Job %d complete: %s", job.id, job.filename)
-
-    def _download_via_gofile_direct(
-        self, job, url: str, pkg_name: str, jd2_dest: str, local_dest: Path
-    ) -> None:
-        """Resolve Gofile CDN URL via API, download through JD2 as a single HTTP link."""
-        with GofileClient(
-            token=self.settings.gofile_token,
-            password=self.settings.gofile_password,
-        ) as gofile:
-            direct_url = gofile.resolve_direct_link(url)
-        logger.info("Job %d: resolved direct URL for %s", job.id, job.filename)
-
-        with JDownloaderClient(
-            host=self.settings.jd2_host,
-            port=self.settings.jd2_port,
-            timeout_sec=self.settings.jd2_api_timeout_sec,
-            poll_interval_sec=self.settings.jd2_poll_interval_sec,
-        ) as jd2:
-            jd2.wait_until_healthy(
-                timeout_sec=min(60.0, self.settings.jd2_startup_wait_sec),
-                interval_sec=self.settings.jd2_poll_interval_sec,
-            )
-            jd2.add_http_download(direct_url, pkg_name, jd2_dest)
-            jd2.wait_until_package_finished(
-                pkg_name,
-                url=direct_url,
-                expected_size=job.size_bytes or None,
-            )
-
-    def _download_via_http(self, job, url: str, local_dest: Path) -> None:
-        """Download directly with httpx (no JD2)."""
-        dest_file = local_dest / job.filename
-        with GofileClient(
-            token=self.settings.gofile_token,
-            password=self.settings.gofile_password,
-        ) as gofile:
-            gofile.download_file(
-                url,
-                str(dest_file),
-                expected_size=job.size_bytes or None,
-            )
-
-    def _download_via_jd2_gofile(
-        self, job, url: str, pkg_name: str, jd2_dest: str
-    ) -> None:
-        """Legacy path: Gofile page URL through JD2 linkgrabber (often broken)."""
-        with JDownloaderClient(
-            host=self.settings.jd2_host,
-            port=self.settings.jd2_port,
-            timeout_sec=self.settings.jd2_api_timeout_sec,
-            poll_interval_sec=self.settings.jd2_poll_interval_sec,
-        ) as jd2:
-            jd2.wait_until_healthy(
-                timeout_sec=min(60.0, self.settings.jd2_startup_wait_sec),
-                interval_sec=self.settings.jd2_poll_interval_sec,
-            )
-            jd2.add_and_start_package(
-                url,
-                package_name=pkg_name,
-                destination_folder=jd2_dest,
-                download_password=self.settings.gofile_password,
-                crawl_timeout_sec=self.settings.jd2_crawl_timeout_sec,
-                expected_size=job.size_bytes or None,
-            )
-            jd2.wait_until_package_finished(
-                pkg_name,
-                url=url,
-                expected_size=job.size_bytes or None,
-            )

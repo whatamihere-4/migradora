@@ -34,7 +34,7 @@ def _env_list(key: str) -> list[str]:
 
 @dataclass
 class Settings:
-    # Gofile
+    # Gofile (premium transfer account — reads shared folders from GOFILE_FOLDER_URLS)
     gofile_folder_urls: list[str] = field(default_factory=list)
     gofile_token: str = ""
     gofile_password: str = ""
@@ -52,7 +52,6 @@ class Settings:
     db_path: str = "/data/state/queue.db"
 
     # Limits
-    max_concurrent_files: int = 1
     min_free_disk_gb: int = 5
     verify_hash: bool = False
     stale_job_timeout_sec: int = 3600
@@ -65,27 +64,8 @@ class Settings:
     upload_retry_delay_sec: int = 30
     discovery_delay_sec: float = 2.0
 
-    # JDownloader2 (local Deprecated API)
-    download_backend: str = "gofile-direct"  # gofile-direct | jd2 | direct
-    jd2_host: str = "jdownloader"
-    jd2_port: int = 3128
-    jd2_download_dir: str = "/output"
-    jd2_api_timeout_sec: float = 30.0
-    jd2_poll_interval_sec: float = 5.0
-    jd2_startup_wait_sec: float = 180.0
-    jd2_crawl_timeout_sec: int = 600
-
     # Filester storage guard
     filester_storage_pause_pct: float = 95.0
-
-    # VPN
-    vpn_enabled: bool = False
-    pia_openvpn_user: str = ""
-    pia_openvpn_password: str = ""
-    pia_server_region: str = "Netherlands"
-    pia_server_regions: list[str] = field(default_factory=list)
-    gluetun_control_url: str = "http://gluetun:8000"
-    vpn_rotate_on_ban: bool = True
 
     # Dashboard
     dashboard_host: str = "0.0.0.0"
@@ -102,7 +82,6 @@ class Settings:
         if env_file:
             load_dotenv(env_file, override=True)
         else:
-            # Search upward from cwd and common locations
             for candidate in (".env", "/app/.env"):
                 if Path(candidate).exists():
                     load_dotenv(candidate, override=True)
@@ -123,7 +102,6 @@ class Settings:
             state_dir=state_dir,
             log_dir=_env("LOG_DIR", "/data/logs"),
             db_path=_env("DB_PATH", f"{state_dir}/queue.db"),
-            max_concurrent_files=_env_int("MAX_CONCURRENT_FILES", 1),
             min_free_disk_gb=_env_int("MIN_FREE_DISK_GB", 5),
             verify_hash=_env_bool("VERIFY_HASH", False),
             stale_job_timeout_sec=_env_int("STALE_JOB_TIMEOUT_SEC", 3600),
@@ -133,24 +111,7 @@ class Settings:
             upload_max_retries=_env_int("UPLOAD_MAX_RETRIES", 5),
             upload_retry_delay_sec=_env_int("UPLOAD_RETRY_DELAY_SEC", 30),
             discovery_delay_sec=float(_env("DISCOVERY_DELAY_SEC", "2")),
-            download_backend=_env("DOWNLOAD_BACKEND", "gofile-direct").lower(),
             filester_storage_pause_pct=float(_env("FILESTER_STORAGE_PAUSE_PCT", "95")),
-            jd2_host=_env("JD2_HOST", "jdownloader"),
-            jd2_port=_env_int("JD2_PORT", 3128),
-            jd2_download_dir=_env("JD2_DOWNLOAD_DIR", "/output"),
-            jd2_api_timeout_sec=float(_env("JD2_API_TIMEOUT_SEC", "30")),
-            jd2_poll_interval_sec=float(_env("JD2_POLL_INTERVAL_SEC", "5")),
-            jd2_startup_wait_sec=float(_env("JD2_STARTUP_WAIT_SEC", "180")),
-            jd2_crawl_timeout_sec=_env_int("JD2_CRAWL_TIMEOUT_SEC", 600),
-            vpn_enabled=_env_bool("VPN_ENABLED", False),
-            pia_openvpn_user=_env("PIA_OPENVPN_USER"),
-            pia_openvpn_password=_env("PIA_OPENVPN_PASSWORD"),
-            pia_server_region=_env("PIA_SERVER_REGION", "Netherlands"),
-            pia_server_regions=_env_list("PIA_SERVER_REGIONS")
-            or _env_list("PIA_SERVER_REGION")
-            or ["Netherlands"],
-            gluetun_control_url=_env("GLUETUN_CONTROL_URL", "http://gluetun:8000"),
-            vpn_rotate_on_ban=_env_bool("VPN_ROTATE_ON_BAN", True),
             dashboard_host=_env("DASHBOARD_HOST", "0.0.0.0"),
             dashboard_port=_env_int("DASHBOARD_PORT", 8080),
             dashboard_bind_port=_env_int(

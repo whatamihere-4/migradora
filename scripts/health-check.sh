@@ -3,17 +3,8 @@
 set -e
 cd "$(dirname "$0")/.."
 
-COMPOSE="docker compose"
-if [ -f docker-compose.vpn.yml ] && docker compose -f docker-compose.yml -f docker-compose.vpn.yml --profile vpn ps -q gluetun 2>/dev/null | grep -q .; then
-  COMPOSE="docker compose -f docker-compose.yml -f docker-compose.vpn.yml --profile vpn"
-fi
-
 echo "=== Containers ==="
-$COMPOSE ps -a || docker compose ps -a
-
-echo
-echo "=== JD2 API ==="
-curl -sf http://localhost:3128/help >/dev/null && echo "OK (port 3128)" || echo "FAIL — run ./scripts/jd2-enable-api.sh && restart jdownloader"
+docker compose ps -a
 
 echo
 echo "=== Orchestrator dashboard ==="
@@ -23,23 +14,16 @@ if [ -f .env ]; then
   . ./.env 2>/dev/null || true
   PORT="${DASHBOARD_PORT:-8080}"
 fi
-curl -sf "http://localhost:${PORT}/health" && echo " OK (port ${PORT})" || echo " FAIL (port ${PORT})"
+curl -sf "http://localhost:${PORT}/health" | head -c 500 && echo || echo " FAIL (port ${PORT})"
 
 echo
-echo "=== JD2 download controller ==="
-curl -sf http://localhost:3128/downloadcontroller/getCurrentState 2>/dev/null \
-  && echo " speed: $(curl -sf http://localhost:3128/downloadcontroller/getSpeedInBps 2>/dev/null || echo 0) B/s" \
-  || echo "FAIL"
-
-echo
-echo "=== Queue (if orchestrator up) ==="
-$COMPOSE exec -T orchestrator python -m migradora status 2>/dev/null || echo "(orchestrator not running)"
+echo "=== Queue ==="
+docker compose exec -T orchestrator python -m migradora status 2>/dev/null || echo "(orchestrator not running)"
 
 echo
 echo "=== Downloads on disk ==="
 du -sh data/downloads 2>/dev/null || echo "(no data/downloads)"
-find data/downloads -type f ! -name '*.part' 2>/dev/null | head -10 || true
 
 echo
-echo "=== Recent orchestrator logs ==="
-$COMPOSE logs orchestrator --tail 15 2>/dev/null || true
+echo "=== Recent logs ==="
+docker compose logs orchestrator --tail 15 2>/dev/null || true

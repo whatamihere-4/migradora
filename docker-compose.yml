@@ -7,7 +7,6 @@ services:
     env_file: .env
     environment:
       DASHBOARD_BIND_PORT: "8080"
-      JD2_DOWNLOAD_DIR: /output
       DOWNLOAD_DIR: /data/downloads
     ports:
       - "${DASHBOARD_PORT:-8080}:8080"
@@ -15,64 +14,10 @@ services:
       - ./data/downloads:/data/downloads
       - ./data/state:/data/state
       - ./data/logs:/data/logs
-      - ./data/jd2/config:/jd2-config
-      - ./jd2/config-templates:/templates:ro
     restart: unless-stopped
-    depends_on:
-      jdownloader:
-        condition: service_healthy
     healthcheck:
       test: ["CMD", "curl", "-f", "http://localhost:8080/health"]
       interval: 30s
       timeout: 10s
       retries: 3
       start_period: 30s
-
-  jdownloader:
-    image: jlesage/jdownloader-2
-    container_name: migradora-jdownloader
-    env_file: .env
-    environment:
-      TAKE_CONFIG_OWNERSHIP: "1"
-      USER_ID: "1000"
-      GROUP_ID: "1000"
-    volumes:
-      - ./data/jd2/config:/config
-      - ./data/downloads:/output
-    ports:
-      - "${JD2_WEBUI_PORT:-5800}:5800"
-      - "${JD2_API_PORT:-3128}:3128"
-    restart: unless-stopped
-    healthcheck:
-      test: ["CMD-SHELL", "wget -qO- http://127.0.0.1:3128/help >/dev/null 2>&1 || exit 1"]
-      interval: 15s
-      timeout: 10s
-      retries: 12
-      start_period: 180s
-
-  # Optional PIA VPN — route jdownloader through VPN:
-  #   docker compose -f docker-compose.yml -f docker-compose.vpn.yml --profile vpn up -d
-  gluetun:
-    profiles: ["vpn"]
-    image: qmcgaw/gluetun:latest
-    container_name: migradora-gluetun
-    cap_add:
-      - NET_ADMIN
-    devices:
-      - /dev/net/tun:/dev/net/tun
-    env_file: .env
-    environment:
-      VPN_SERVICE_PROVIDER: private internet access
-      OPENVPN_USER: ${PIA_OPENVPN_USER}
-      OPENVPN_PASSWORD: ${PIA_OPENVPN_PASSWORD}
-      SERVER_REGIONS: ${PIA_SERVER_REGION:-Netherlands}
-      TZ: ${TZ:-UTC}
-    volumes:
-      - ./data/gluetun:/gluetun
-    restart: unless-stopped
-    healthcheck:
-      test: ["CMD-SHELL", "wget -qO- https://api.ipify.org >/dev/null 2>&1 || exit 1"]
-      interval: 30s
-      timeout: 10s
-      retries: 5
-      start_period: 60s

@@ -7,7 +7,7 @@ import json
 import sys
 
 from migradora.config import Settings
-from migradora.discovery.jd2_discovery import discover_and_enqueue
+from migradora.discovery.api_discovery import discover_and_enqueue
 from migradora.logger import setup_logging
 from migradora.models import QueueState
 from migradora.orchestrator import run_orchestrator
@@ -67,7 +67,7 @@ def main() -> int:
     parser = argparse.ArgumentParser(description="Migradora: Gofile → Filester mirror")
     sub = parser.add_subparsers(dest="command", required=True)
 
-    sub.add_parser("discover", help="Discover files from Gofile folders and enqueue")
+    sub.add_parser("discover", help="Crawl GOFILE_FOLDER_URLS via API and enqueue files")
     sub.add_parser("status", help="Show queue status")
     sub.add_parser("resume", help="Resume paused queue")
     sub.add_parser("retry-failed", help="Reset failed jobs to pending and resume queue")

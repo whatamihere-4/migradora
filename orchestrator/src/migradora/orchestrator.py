@@ -1,14 +1,14 @@
-"""Main orchestrator: monitors, discovery, pipeline coordinator."""
+"""Main orchestrator: monitors, discovery, pipeline."""
 
 from __future__ import annotations
 
 import logging
 import threading
 import time
+from pathlib import Path
 
 from migradora.config import Settings
-from migradora.discovery.jd2_discovery import discover_and_enqueue
-from migradora.jdownloader.client import JDownloaderClient
+from migradora.discovery.api_discovery import discover_and_enqueue
 from migradora.logger import setup_logging
 from migradora.models import QueueState
 from migradora.monitor.filester_storage import FilesterStorageMonitor
@@ -19,7 +19,6 @@ logger = logging.getLogger("migradora.orchestrator")
 
 
 def write_heartbeat(state_dir: str) -> None:
-    from pathlib import Path
     Path(state_dir, "orchestrator.heartbeat").write_text(str(time.time()))
 
 
@@ -30,11 +29,6 @@ class Orchestrator:
         self.filester_monitor = FilesterStorageMonitor(settings, self.queue)
         self.pipeline = PipelineCoordinator(settings, self.queue)
         self._stop = threading.Event()
-        self._jd2_client = JDownloaderClient(
-            host=settings.jd2_host,
-            port=settings.jd2_port,
-            timeout_sec=settings.jd2_api_timeout_sec,
-        )
 
     def monitor_loop(self) -> None:
         interval = max(60, int(self.settings.worker_poll_interval_sec * 12))
@@ -45,6 +39,7 @@ class Orchestrator:
             state, _ = self.queue.get_queue_state()
             if state == QueueState.PAUSED_DISK:
                 from migradora.utils import free_disk_gb
+
                 free_gb = free_disk_gb(self.settings.download_dir)
                 if free_gb >= self.settings.min_free_disk_gb:
                     self.queue.set_queue_state(QueueState.RUNNING, "")
@@ -74,9 +69,6 @@ class Orchestrator:
         self.queue.set_queue_state(QueueState.PAUSED, reason)
         logger.info("Queue paused: %s", reason)
 
-    def jd2_healthy(self) -> bool:
-        return self._jd2_client.health()
-
     def stop(self) -> None:
         self._stop.set()
         self.pipeline.stop()
@@ -87,36 +79,20 @@ def run_orchestrator(settings: Settings | None = None) -> None:
     settings.ensure_dirs()
     setup_logging("orchestrator", settings.log_dir, settings.log_level)
 
-    from migradora.jd2_config import (
-        ensure_general_settings,
-        ensure_remote_api_enabled,
-        jd2_initialized,
-    )
-    if jd2_initialized("/jd2-config"):
-        jd2_changed = ensure_remote_api_enabled("/jd2-config", "/templates")
-        jd2_changed = ensure_general_settings("/jd2-config", "/output", "/templates") or jd2_changed
-        if jd2_changed:
-            logger.warning(
-                "JD2 config was updated — restart jdownloader: "
-                "docker compose restart jdownloader"
-            )
-    else:
-        logger.warning(
-            "JD2 not initialized. Start with empty data/jd2/config, wait for "
-            "web UI :5800, then run: ./scripts/jd2-enable-api.sh"
-        )
+    if not settings.gofile_token:
+        logger.error("GOFILE_TOKEN is required (premium Gofile account)")
+    if not settings.gofile_folder_urls:
+        logger.warning("GOFILE_FOLDER_URLS is empty — run discover after adding folder links")
 
     orch = Orchestrator(settings)
     state, reason = orch.queue.get_queue_state()
-    if state.value == "paused_traffic" and "GB" in (reason or ""):
+    if state == QueueState.PAUSED_TRAFFIC:
         logger.warning(
-            "Queue is paused_traffic from an old Gofile account traffic check (%s). "
-            "That monitor was removed — this is not your VPS usage. "
-            "Run: python -m migradora resume  (or enable VPN + rotate IP for download blocks)",
+            "Queue paused_traffic (%s) — legacy state from old setup. Run: python -m migradora resume",
             reason,
         )
     orch.start_background()
-    logger.info("Orchestrator started (pipeline + monitors)")
+    logger.info("Orchestrator started")
 
     from migradora.api.app import create_app
     import uvicorn

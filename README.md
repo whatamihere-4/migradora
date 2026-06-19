@@ -1,162 +1,88 @@
-# Migradora — Gofile → Filester Mirror (JDownloader2)
+# Migradora — Gofile → Filester Mirror
 
-Production Docker pipeline that mirrors large video libraries from **Gofile.io** to **Filester.me** using **JDownloader2** (local Deprecated API, no MyJDownloader cloud account).
+Minimal Docker pipeline: **Gofile Premium API** → **httpx download** → **split** → **Filester upload**.
 
-## Features
+Designed for multi-TB migrations on a small VPS (serial downloads, resumable queue).
 
-- Gofile downloads via JD2's maintained Gofile plugin
-- Local Deprecated API on port 3128 (no external services)
-- Serial pipeline: one download at a time, then split → upload → cleanup → next
-- SQLite queue — idempotent, resumable across restarts
-- Automatic file splitting for uploads over 10 GB
-- FastAPI dashboard (`/health`, `/status`, `/jobs`)
-- Filester storage monitoring with auto-pause
+## Setup
 
-## Quick start
-
-### 1. Configure
+### 1. Configure `.env`
 
 ```bash
 cp .env.example .env
-# Edit GOFILE_FOLDER_URLS, FILESTER_API_KEY
 ```
 
-### 2. First-run JDownloader setup
+| Variable | Description |
+|----------|-------------|
+| `GOFILE_TOKEN` | API token from [gofile.io/myProfile](https://gofile.io/myProfile) on account #2 (subscription **or** PAYG) |
+| `GOFILE_FOLDER_URLS` | Comma-separated shared folder links from your **source account** (#1) |
+| `GOFILE_PASSWORD` | Only if folders are password-protected |
+| `FILESTER_API_KEY` | Filester API key |
 
-**Do not** copy anything into `data/jd2/config/cfg/` before JD2 has started once — a partial `cfg/` folder breaks the container init script.
+### 2. Share folders from source account
+
+On account #1 (owns the files), share each folder and paste the links into `GOFILE_FOLDER_URLS`:
 
 ```bash
-# Ensure config volume is empty (see troubleshooting if you already copied files)
-mkdir -p data/jd2/config   # empty directory only
-
-docker compose up -d jdownloader
-
-# Wait ~2 minutes until web UI loads:
-#   http://your-vps:5800
-
-# Enable local Deprecated API (port 3128)
-chmod +x scripts/jd2-enable-api.sh
-./scripts/jd2-enable-api.sh
-docker compose restart jdownloader
-
-# Verify API
-curl http://localhost:3128/help
-
-# Start orchestrator (pipeline + dashboard)
-docker compose up -d orchestrator
+GOFILE_FOLDER_URLS=https://gofile.io/d/abc123...,https://gofile.io/d/def456...
 ```
 
-In the JD2 web UI (http://your-vps:5800), also confirm:
-- Settings → Advanced → `RemoteAPI` → Deprecated API **enabled**
-- Deprecated API localhost only: **disabled**
-- Max simultaneous downloads: **1**
-- Default download folder: `/output`
-
-### 3. Discover and run
+### 3. Start
 
 ```bash
+docker compose up -d --build
+```
+
+### 4. Discover and run
+
+```bash
+# List files in a folder (sanity check)
+./scripts/test-gofile-resolve.sh https://gofile.io/d/YOUR_FOLDER_ID
+
+# Enqueue all files from GOFILE_FOLDER_URLS
 docker compose exec orchestrator python -m migradora discover
-curl http://localhost:8080/status
-docker compose logs -f orchestrator jdownloader
-```
 
-The pipeline runs automatically inside the orchestrator — no separate worker containers.
+# Check queue
+docker compose exec orchestrator python -m migradora status
+
+# Pipeline runs automatically; or resume if paused
+docker compose exec orchestrator python -m migradora resume
+```
 
 ## Architecture
 
-```
-jdownloader   → Gofile downloads (JD2 plugin)
-orchestrator  → discovery, pipeline coordinator, dashboard, monitors
-SQLite queue  → coordinates jobs at ./data/state/queue.db
-```
-
-**Serial pipeline** (one file at a time):
-
-1. Claim next `pending` job from queue
-2. `POST /linkgrabberv2/addLinks` to JD2 (one URL)
-3. Poll until download finished
-4. Split if > 9.5 GiB
-5. Upload part(s) to Filester, verify, delete local files
-6. Mark `uploaded`, proceed to next job
-
-## Services
-
-| Service | Port | Role |
-|---------|------|------|
-| `orchestrator` | `${DASHBOARD_PORT}` | API dashboard + pipeline |
-| `jdownloader` | `5800` (UI), `3128` (API) | Downloads |
-
-## CLI
-
-```bash
-docker compose exec orchestrator python -m migradora discover
-docker compose exec orchestrator python -m migradora status
-docker compose exec orchestrator python -m migradora resume
+```text
+orchestrator (single container)
+  ├── API discovery: crawl GOFILE_FOLDER_URLS via Premium API
+  ├── Pipeline: resolve CDN URL → download → split → Filester → cleanup
+  └── SQLite queue (resumable across restarts)
 ```
 
-## HTTP API
+## API
 
 | Endpoint | Description |
 |----------|-------------|
-| `GET /health` | JD2 API + pipeline health |
-| `GET /status` | Queue stats, pipeline phase, Filester storage |
+| `GET /health` | Pipeline health |
+| `GET /status` | Queue stats, Filester storage |
 | `GET /jobs?status=failed` | List jobs |
-| `POST /discover` | Crawl Gofile folders via JD2 linkgrabber |
+| `POST /discover` | Crawl folders and enqueue |
 | `POST /resume` | Resume paused queue |
-| `POST /pause` | Pause queue |
+| `POST /retry-failed` | Reset failed jobs to pending |
 
-## VPN (optional — Gofile IP blocks)
+## Scripts
 
-Gofile free downloads are often limited **per IP**, not per VPS disk usage. The old orchestrator also paused on **account** traffic (~222 GB lifetime on a Gofile token) — that monitor is gone, but the pause may still be stuck in SQLite. Clear it with:
+| Script | Purpose |
+|--------|---------|
+| `./scripts/test-gofile-resolve.sh [url]` | Test API token (folder list or file resolve) |
+| `./scripts/reset-failed-jobs.sh` | Reset failed/stuck jobs |
+| `./scripts/health-check.sh` | Quick VPS diagnostics |
 
-```bash
-docker compose exec orchestrator python -m migradora resume
-```
+## Large files
 
-### Enable PIA via gluetun
-
-Add to `.env`:
-
-```bash
-VPN_ENABLED=true
-PIA_OPENVPN_USER=your_pia_username
-PIA_OPENVPN_PASSWORD=your_pia_password
-PIA_SERVER_REGIONS=Netherlands,Switzerland,France,Germany
-```
-
-Start with VPN (JD2 downloads go through PIA; orchestrator stays on normal network):
+Files over `FILESTER_MAX_FILE_BYTES` (~9.5 GiB) are split with `split(1)`. Reassemble:
 
 ```bash
-docker compose -f docker-compose.yml -f docker-compose.vpn.yml --profile vpn up -d
-```
-
-Requires Docker Compose v2.23+ (`ports: !override` in the VPN overlay). Check with `docker compose version`.
-
-JD2 web UI and API move to gluetun's ports (same host ports `5800` / `3128`).
-
-### Rotate egress IP
-
-```bash
-chmod +x scripts/vpn-rotate.sh scripts/vpn-status.sh
-./scripts/vpn-status.sh
-./scripts/vpn-rotate.sh
-docker compose exec orchestrator python -m migradora resume
-```
-
-Or via API:
-
-```bash
-curl -X POST http://localhost:8080/vpn/rotate
-```
-
-With `VPN_ROTATE_ON_BAN=true`, the pipeline auto-rotates VPN when JD2 reports a Gofile traffic/block error.
-
-## Monitoring
-
-```bash
-docker compose logs -f orchestrator jdownloader
-curl http://localhost:8080/status | jq
-tail -f data/logs/migradora.jsonl
+cat video.part*.mp4 > video.mp4
 ```
 
 ## Resuming after restart
@@ -165,35 +91,18 @@ tail -f data/logs/migradora.jsonl
 docker compose up -d
 ```
 
-Queue state persists in SQLite. Stale `downloading` jobs reset to `pending` after `STALE_JOB_TIMEOUT_SEC`.
-
-## Large file splitting
-
-Files over `FILESTER_MAX_FILE_BYTES` are split with `split(1)`. Reassemble manually:
-
-```bash
-cat video.part*.mp4 > video.mp4
-```
-
-## Warnings
-
-1. **Filester 10 GB account storage** may halt migration early — monitor `/status`
-2. **JD2 uses significant RAM** (~512MB–1GB) — acceptable tradeoff for reliable Gofile support
-3. **Deprecated API** may change in future JD2 versions — pin image if needed
-4. **Runtime**: multi-TB migrations take weeks on free tiers
+Queue state persists in `data/state/queue.db`. Stale `downloading` jobs reset to `pending` after `STALE_JOB_TIMEOUT_SEC`.
 
 ## Troubleshooting
 
 | Symptom | Fix |
 |---------|-----|
-| `jq: ... GraphicalUserInterfaceSettings.json: No such file` on jdownloader start | Partial `cfg/` broke init. Run `./scripts/jd2-reset-config.sh`, then follow first-run steps |
-| `curl :3128/help` connection refused | Run `./scripts/jd2-enable-api.sh` then `docker compose restart jdownloader` |
-| `JD2 API not reachable` in discover | Same as above; wait for `curl http://localhost:3128/help` |
-| Discover finds 0 files / crawl timeout | Rebuild orchestrator after updates; confirm folder expands in JD2 web UI (:5800) |
-| Pipeline stuck on downloading | Gofile IP/traffic block — enable VPN, run `./scripts/vpn-rotate.sh`, resume |
-| `paused_traffic` / 222 GB message | Stale pause from old account monitor — `python -m migradora resume`; use VPN for IP blocks |
-| JD2 `Invalid download directory` / stuck at 0% | Run `./scripts/jd2-fix-download-dir.sh`, restart jdownloader, delete failed package in web UI, `resume` |
-| Queue paused (storage) | Free Filester account space |
+| `GOFILE_TOKEN is required` | Set token from premium account in `.env`, rebuild |
+| `error-notPremium` | Token account needs active premium (subscription or PAYG with credits) |
+| Discover finds 0 files | Check folder is shared; test with `test-gofile-resolve.sh` |
+| Queue paused (disk) | Free space under `data/downloads` |
+| Queue paused (storage) | Filester account full — free space or upgrade |
+| Download size mismatch | Re-run job: `./scripts/reset-failed-jobs.sh` |
 
 ## License
 

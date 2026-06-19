@@ -14,12 +14,9 @@ RUN pip install --no-cache-dir \
 
 COPY shared/src /app/shared/src
 COPY orchestrator/src /app/orchestrator/src
-COPY scripts/jd2-init-config.sh /app/scripts/jd2-init-config.sh
-COPY jd2/config-templates /templates
 
 ENV PYTHONPATH=/app/shared/src:/app/orchestrator/src
 ENV PYTHONUNBUFFERED=1
-ENV JD2_CONFIG_DIR=/data/jd2/config
 
 EXPOSE 8080
 

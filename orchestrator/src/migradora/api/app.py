@@ -26,17 +26,22 @@ def _heartbeat_age(state_dir: str, service: str) -> float | None:
 
 
 def create_app(settings: Settings, orchestrator: Orchestrator) -> FastAPI:
-    app = FastAPI(title="Migradora", version="2.0.0", description="Gofile → Filester mirror via JDownloader2")
+    app = FastAPI(title="Migradora", version="3.0.0", description="Gofile → Filester mirror")
     queue = QueueManager(settings.db_path)
 
     @app.get("/health")
     def health() -> dict[str, Any]:
         pipeline_age = _heartbeat_age(settings.state_dir, "pipeline")
         orch_age = _heartbeat_age(settings.state_dir, "orchestrator")
-        jd2_ok = orchestrator.jd2_healthy()
+        ok = (
+            pipeline_age is not None
+            and pipeline_age < settings.heartbeat_interval_sec * 3
+            and orch_age is not None
+            and orch_age < settings.heartbeat_interval_sec * 6
+        )
         return {
-            "status": "ok" if jd2_ok else "degraded",
-            "jdownloader_api": jd2_ok,
+            "status": "ok" if ok else "degraded",
+            "gofile_token_set": bool(settings.gofile_token),
             "pipeline": {
                 "alive": pipeline_age is not None and pipeline_age < settings.heartbeat_interval_sec * 3,
                 "last_heartbeat_age_sec": pipeline_age,
@@ -57,7 +62,6 @@ def create_app(settings: Settings, orchestrator: Orchestrator) -> FastAPI:
             "queue_state": state.value,
             "pause_reason": pause_reason,
             "pipeline": orchestrator.pipeline.status,
-            "jdownloader_api": orchestrator.jd2_healthy(),
             "stats": {
                 "total": stats.total,
                 "pending": stats.pending,
@@ -116,19 +120,5 @@ def create_app(settings: Settings, orchestrator: Orchestrator) -> FastAPI:
     def discover(force: bool = False) -> dict[str, Any]:
         result = orchestrator.discover(force=force)
         return {"status": "ok", **result}
-
-    @app.post("/vpn/rotate")
-    def vpn_rotate() -> dict[str, Any]:
-        if not settings.vpn_enabled:
-            return {"status": "error", "message": "Set VPN_ENABLED=true and use docker-compose.vpn.yml"}
-        from migradora.vpn import get_egress_ip, rotate_vpn
-
-        before = get_egress_ip(settings.gluetun_control_url)
-        result = rotate_vpn(settings.gluetun_control_url)
-        return {
-            "status": "ok",
-            "ip_before": result.get("ip_before") or before,
-            "ip_after": result.get("ip_after"),
-        }
 
     return app
