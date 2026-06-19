@@ -222,20 +222,12 @@ class PipelineCoordinator:
                 timeout_sec=min(60.0, self.settings.jd2_startup_wait_sec),
                 interval_sec=self.settings.jd2_poll_interval_sec,
             )
-            try:
-                stale = jd2.query_download_packages(package_name=pkg_name)
-                stale_ids = _as_int_list([p.get("uuid") for p in stale])
-                if stale_ids:
-                    jd2.remove_downloads(package_ids=stale_ids)
-            except Exception as exc:
-                logger.debug("JD2 stale package cleanup skipped: %s", exc)
-
-            jd2.add_links(
+            jd2.add_and_start_package(
                 url,
                 package_name=pkg_name,
                 destination_folder=jd2_dest,
-                autostart=True,
                 download_password=self.settings.gofile_password,
+                crawl_timeout_sec=self.settings.jd2_crawl_timeout_sec,
             )
             links = jd2.wait_until_package_finished(pkg_name)
             # Update size from JD2 if we didn't know it

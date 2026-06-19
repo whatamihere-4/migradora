@@ -26,6 +26,12 @@ fi
 curl -sf "http://localhost:${PORT}/health" && echo " OK (port ${PORT})" || echo " FAIL (port ${PORT})"
 
 echo
+echo "=== JD2 download controller ==="
+curl -sf http://localhost:3128/downloadcontroller/getCurrentState 2>/dev/null \
+  && echo " speed: $(curl -sf http://localhost:3128/downloadcontroller/getSpeedInBps 2>/dev/null || echo 0) B/s" \
+  || echo "FAIL"
+
+echo
 echo "=== Queue (if orchestrator up) ==="
 $COMPOSE exec -T orchestrator python -m migradora status 2>/dev/null || echo "(orchestrator not running)"
 

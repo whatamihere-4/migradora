@@ -295,6 +295,116 @@ class JDownloaderClient:
             packages,
         )
 
+    def clear_package(self, package_name: str) -> None:
+        for query_fn, remove_fn in (
+            (self.query_download_packages, self.remove_downloads),
+            (self.query_linkgrabber_packages, self.remove_linkgrabber),
+        ):
+            packages = query_fn(package_name=package_name)
+            pkg_ids = _as_int_list([p.get("uuid") for p in packages])
+            if pkg_ids:
+                remove_fn(package_ids=pkg_ids)
+
+    def get_download_state(self) -> str:
+        result = self._get("/downloadcontroller/getCurrentState")
+        return str(_unwrap_data(result) or "")
+
+    def get_download_speed_bps(self) -> int:
+        result = self._get("/downloadcontroller/getSpeedInBps")
+        data = _unwrap_data(result)
+        try:
+            return int(data or 0)
+        except (TypeError, ValueError):
+            return 0
+
+    def start_downloads(self) -> None:
+        resp = self._client.post("/downloadcontroller/start", json=[])
+        resp.raise_for_status()
+
+    def set_downloads_paused(self, paused: bool) -> None:
+        self._post_action("/downloadcontroller/pause", paused)
+
+    def move_to_downloadlist(
+        self,
+        link_ids: list[int] | None = None,
+        package_ids: list[int] | None = None,
+    ) -> None:
+        links = link_ids or []
+        packages = package_ids or []
+        if not links and not packages:
+            return
+        self._post_action("/linkgrabberv2/moveToDownloadlist", links, packages)
+
+    def force_download(
+        self,
+        link_ids: list[int] | None = None,
+        package_ids: list[int] | None = None,
+    ) -> None:
+        links = link_ids or []
+        packages = package_ids or []
+        if not links and not packages:
+            return
+        self._post_action("/downloadsV2/forceDownload", links, packages)
+
+    def ensure_downloads_running(self) -> None:
+        state = self.get_download_state().upper()
+        logger.info("JD2 download controller: %s", state or "unknown")
+        if any(token in state for token in ("PAUSE", "STOP", "IDLE")):
+            self.set_downloads_paused(False)
+            self.start_downloads()
+
+    def add_and_start_package(
+        self,
+        url: str,
+        package_name: str,
+        destination_folder: str,
+        *,
+        download_password: str = "",
+        crawl_timeout_sec: int = 600,
+    ) -> None:
+        """Crawl in linkgrabber, move to downloads, and start."""
+        self.clear_package(package_name)
+
+        crawl_job_id = self.add_links(
+            url,
+            package_name=package_name,
+            destination_folder=destination_folder,
+            autostart=False,
+            download_password=download_password,
+        )
+
+        links = self.wait_for_linkgrabber_crawl(
+            package_name,
+            job_id=crawl_job_id,
+            timeout_sec=crawl_timeout_sec,
+        )
+        logger.info(
+            "JD2 linkgrabber ready: %s (%d links)",
+            package_name,
+            len(links),
+        )
+
+        lg_packages = self.query_linkgrabber_packages(package_name=package_name)
+        pkg_ids = _as_int_list([p.get("uuid") for p in lg_packages])
+        if not pkg_ids:
+            pkg_ids = _as_int_list([link.get("packageUUID") for link in links])
+
+        if pkg_ids:
+            self.move_to_downloadlist(package_ids=pkg_ids)
+            logger.info("JD2 moved %s to download list", package_name)
+        else:
+            dl_packages = self.query_download_packages(package_name=package_name)
+            if not dl_packages:
+                raise RuntimeError(
+                    f"JD2 crawl for {package_name} produced no movable package"
+                )
+
+        self.ensure_downloads_running()
+        dl_packages = self.query_download_packages(package_name=package_name)
+        dl_pkg_ids = _as_int_list([p.get("uuid") for p in dl_packages])
+        if dl_pkg_ids:
+            self.force_download(package_ids=dl_pkg_ids)
+
     def wait_until_package_finished(
         self,
         package_name: str,
@@ -302,11 +412,28 @@ class JDownloaderClient:
     ) -> list[dict[str, Any]]:
         deadline = time.time() + timeout_sec
         stalled = 0
+        missing_pkg_polls = 0
         while time.time() < deadline:
             packages = self.query_download_packages(package_name=package_name)
             if not packages:
+                lg_packages = self.query_linkgrabber_packages(package_name=package_name)
+                if lg_packages:
+                    pkg_ids = _as_int_list([p.get("uuid") for p in lg_packages])
+                    logger.warning(
+                        "%s still in linkgrabber — moving to download list",
+                        package_name,
+                    )
+                    self.move_to_downloadlist(package_ids=pkg_ids)
+                    self.ensure_downloads_running()
+                    self.force_download(package_ids=pkg_ids)
+                missing_pkg_polls += 1
+                if missing_pkg_polls >= 12:
+                    raise RuntimeError(
+                        f"JD2 package {package_name} never appeared in download list"
+                    )
                 time.sleep(self.poll_interval_sec)
                 continue
+            missing_pkg_polls = 0
             pkg = packages[0]
             pkg_uuid = _as_int(pkg.get("uuid"))
             links = (
@@ -329,10 +456,17 @@ class JDownloaderClient:
                 total = sum(int(link.get("bytesTotal") or 0) for link in links) or 1
                 if loaded == 0:
                     stalled += 1
+                    if stalled in (3, 6, 9):
+                        self.ensure_downloads_running()
+                        if pkg_uuid is not None:
+                            self.force_download(package_ids=[pkg_uuid])
                     if stalled >= 12:
                         statuses = [link.get("status") for link in links]
+                        speed = self.get_download_speed_bps()
                         raise RuntimeError(
-                            f"JD2 download stalled at 0% for {package_name}: {statuses}"
+                            f"JD2 download stalled at 0% for {package_name}: "
+                            f"statuses={statuses}, speed={speed} B/s, "
+                            f"saveTo={pkg.get('saveTo')}"
                         )
                 else:
                     stalled = 0
