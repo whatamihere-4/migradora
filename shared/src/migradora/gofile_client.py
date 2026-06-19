@@ -69,6 +69,11 @@ class GofileClient:
         if self.token:
             return self.token
         resp = self._client.post("https://api.gofile.io/accounts")
+        if resp.status_code == 429:
+            raise RuntimeError(
+                "Gofile rate-limited guest account creation (429). "
+                "Set GOFILE_TOKEN in .env from https://gofile.io/myProfile and wait a few minutes."
+            )
         resp.raise_for_status()
         data = resp.json()
         if data.get("status") != "ok":
@@ -77,12 +82,15 @@ class GofileClient:
         logger.info("Created Gofile guest token")
         return self.token
 
-    def _website_token(self, lang: str = "en-US") -> str:
+    def _website_tokens(self, lang: str = "en-US") -> list[str]:
         token = self._ensure_token()
         epoch = int(time.time() / 14400)
-        for salt in _WT_SALTS:
-            payload = f"{_USER_AGENT}::{lang}::{token}::{epoch}::{salt}"
-            yield hashlib.sha256(payload.encode()).hexdigest()
+        return [
+            hashlib.sha256(
+                f"{_USER_AGENT}::{lang}::{token}::{epoch}::{salt}".encode()
+            ).hexdigest()
+            for salt in _WT_SALTS
+        ]
 
     def _get_folder(self, folder_id: str) -> dict[str, Any]:
         token = self._ensure_token()
@@ -96,19 +104,30 @@ class GofileClient:
         if self.password:
             params["password"] = hashlib.sha256(self.password.encode()).hexdigest()
         last_error = "unknown"
-        for wt in self._website_token():
+        for wt in self._website_tokens():
             headers = {
                 "Authorization": f"Bearer {token}",
                 "X-Website-Token": wt,
                 "X-BL": "en-US",
             }
+            query = {**params, "wt": wt, "cache": "true"}
             resp = self._client.get(
                 f"https://api.gofile.io/contents/{folder_id}",
-                params=params,
+                params=query,
                 headers=headers,
             )
-            resp.raise_for_status()
-            body = resp.json()
+            if resp.status_code == 429:
+                raise RuntimeError(
+                    "Gofile API rate limited (429). Wait a few minutes or rotate VPN."
+                )
+            if resp.status_code == 401:
+                last_error = "http-401"
+                continue
+            try:
+                body = resp.json()
+            except Exception:
+                resp.raise_for_status()
+                raise
             status = body.get("status", "")
             if status == "ok":
                 return body["data"]
@@ -116,7 +135,12 @@ class GofileClient:
             if status in ("error-wrongToken", "error-notPremium"):
                 continue
             break
-        raise RuntimeError(f"Gofile folder lookup failed ({last_error})")
+        hint = (
+            "Set GOFILE_TOKEN in .env (from https://gofile.io/myProfile)."
+            if not self.token
+            else "Check GOFILE_TOKEN / VPN egress IP."
+        )
+        raise RuntimeError(f"Gofile folder lookup failed ({last_error}). {hint}")
 
     def resolve_direct_link(self, gofile_url: str) -> str:
         """Resolve a Gofile file URL to a direct CDN download link."""

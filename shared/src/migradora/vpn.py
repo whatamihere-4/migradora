@@ -25,7 +25,9 @@ GOFILE_BLOCK_MARKERS = (
 
 def is_gofile_traffic_block(message: str) -> bool:
     text = message.lower()
-    if "gofile" not in text:
+    if "gofile" not in text and "api.gofile.io" not in text:
+        return False
+    if "429" in text and "guest account" in text:
         return False
     return any(marker in text for marker in GOFILE_BLOCK_MARKERS)
 
