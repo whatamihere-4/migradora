@@ -228,8 +228,13 @@ class PipelineCoordinator:
                 destination_folder=jd2_dest,
                 download_password=self.settings.gofile_password,
                 crawl_timeout_sec=self.settings.jd2_crawl_timeout_sec,
+                expected_size=job.size_bytes or None,
             )
-            links = jd2.wait_until_package_finished(pkg_name)
+            links = jd2.wait_until_package_finished(
+                pkg_name,
+                url=url,
+                expected_size=job.size_bytes or None,
+            )
             # Update size from JD2 if we didn't know it
             if links and not job.size_bytes:
                 total = sum(int(l.get("bytesTotal") or 0) for l in links)

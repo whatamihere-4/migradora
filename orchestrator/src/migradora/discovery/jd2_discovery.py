@@ -97,6 +97,9 @@ def discover_and_enqueue(settings: Settings, force: bool = False) -> dict[str, i
                 url = link.get("url") or link.get("variant") or ""
                 if not url:
                     continue
+                if "#file=" not in url:
+                    logger.warning("Skipping non-file Gofile URL: %s", url[:80])
+                    continue
                 name = link.get("name") or link.get("filename") or "unknown"
                 size = int(link.get("bytesTotal") or link.get("size") or 0)
                 stats["discovered"] += 1

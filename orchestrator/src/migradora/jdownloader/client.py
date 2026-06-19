@@ -97,12 +97,23 @@ def _link_failed(link: dict[str, Any]) -> str | None:
     return None
 
 
-def filter_links_for_url(url: str, links: list[dict[str, Any]]) -> list[dict[str, Any]]:
+def gofile_file_id(url: str) -> str | None:
+    if "#file=" not in url:
+        return None
+    return url.split("#file=", 1)[1].split("&")[0].lower()
+
+
+def filter_links_for_url(
+    url: str,
+    links: list[dict[str, Any]],
+    *,
+    expected_size: int | None = None,
+) -> list[dict[str, Any]]:
     """Keep only the link(s) matching a file-specific Gofile URL."""
     if not links:
         return links
-    if "#file=" in url:
-        file_id = url.split("#file=", 1)[1].split("&")[0].lower()
+    file_id = gofile_file_id(url)
+    if file_id:
         matched = [
             link
             for link in links
@@ -118,13 +129,29 @@ def filter_links_for_url(url: str, links: list[dict[str, Any]]) -> list[dict[str
         or "#file=" in (link.get("url") or "")
     ]
     if without_folder:
-        return without_folder
+        links = without_folder
+    if expected_size and len(links) > 1:
+        exact = [
+            link
+            for link in links
+            if int(link.get("bytesTotal") or 0) == expected_size
+        ]
+        if exact:
+            return exact
     if len(links) > 1:
-        links = sorted(
-            links,
-            key=lambda link: int(link.get("bytesTotal") or 0),
-            reverse=True,
-        )
+        if expected_size:
+            links = sorted(
+                links,
+                key=lambda link: abs(
+                    int(link.get("bytesTotal") or 0) - expected_size
+                ),
+            )
+        else:
+            links = sorted(
+                links,
+                key=lambda link: int(link.get("bytesTotal") or 0),
+                reverse=True,
+            )
         return [links[0]]
     return links
 
@@ -352,6 +379,93 @@ class JDownloaderClient:
             except Exception as exc:
                 logger.warning("JD2 clear %s failed: %s", package_name, exc)
 
+    def clear_gofile_url(self, url: str) -> None:
+        """Remove duplicate Gofile links for this file from both JD2 lists."""
+        file_id = gofile_file_id(url)
+        folder_base = url.split("#")[0].rstrip("/").lower()
+        for query_fn, remove_fn in (
+            (self.query_download_links, self.remove_downloads),
+            (self.query_linkgrabber_links, self.remove_linkgrabber),
+        ):
+            try:
+                drop_ids: list[int] = []
+                for link in query_fn():
+                    link_url = (link.get("url") or "").lower()
+                    if file_id and file_id in link_url:
+                        uid = _as_int(link.get("uuid"))
+                        if uid is not None:
+                            drop_ids.append(uid)
+                    elif not file_id and link_url.split("#")[0].rstrip("/") == folder_base:
+                        uid = _as_int(link.get("uuid"))
+                        if uid is not None:
+                            drop_ids.append(uid)
+                if drop_ids:
+                    remove_fn(link_ids=drop_ids)
+                    logger.info("JD2 cleared %d duplicate link(s) for %s", len(drop_ids), url[:60])
+            except Exception as exc:
+                logger.warning("JD2 clear_gofile_url failed: %s", exc)
+
+    def _prune_download_links(
+        self,
+        keep_links: list[dict[str, Any]],
+        all_links: list[dict[str, Any]],
+    ) -> list[dict[str, Any]]:
+        keep_ids = {
+            uid
+            for link in keep_links
+            if (uid := _as_int(link.get("uuid"))) is not None
+        }
+        drop_ids = [
+            uid
+            for link in all_links
+            if (uid := _as_int(link.get("uuid"))) is not None and uid not in keep_ids
+        ]
+        if drop_ids:
+            try:
+                self.remove_downloads(link_ids=drop_ids)
+                logger.info("JD2 removed %d extra download link(s)", len(drop_ids))
+            except Exception as exc:
+                logger.warning("JD2 prune downloads failed: %s", exc)
+        return [
+            link
+            for link in all_links
+            if _as_int(link.get("uuid")) in keep_ids
+        ]
+
+    def _resume_existing_package(
+        self,
+        package_name: str,
+        url: str,
+        *,
+        expected_size: int | None = None,
+    ) -> bool:
+        """If package is already in downloads with the right link, resume without re-adding."""
+        packages = self.query_download_packages(package_name=package_name)
+        if not packages:
+            return False
+        pkg_uuid = _as_int(packages[0].get("uuid"))
+        if pkg_uuid is None:
+            return False
+        links = self.query_download_links(package_uuids=[pkg_uuid])
+        if not links:
+            return False
+        wanted = filter_links_for_url(url, links, expected_size=expected_size)
+        if not wanted:
+            return False
+        kept = self._prune_download_links(wanted, links)
+        if not kept:
+            return False
+        logger.info(
+            "JD2 resuming %s (%d link(s), no re-add)",
+            package_name,
+            len(kept),
+        )
+        self.ensure_downloads_running()
+        link_ids = _as_int_list([link.get("uuid") for link in kept])
+        if link_ids:
+            self.force_download(link_ids=link_ids)
+        return True
+
     def get_download_state(self) -> str:
         result = self._get("/downloadcontroller/getCurrentState")
         return str(_unwrap_data(result) or "")
@@ -476,20 +590,30 @@ class JDownloaderClient:
         timeout_sec: float = 120.0,
     ) -> list[dict[str, Any]]:
         deadline = time.time() + timeout_sec
+        link_ids = _as_int_list([link.get("uuid") for link in wanted_links])
         while time.time() < deadline:
             packages = self.query_download_packages(package_name=package_name)
             if packages:
+                pkg_uuid = _as_int(packages[0].get("uuid"))
+                if pkg_uuid is not None:
+                    dl_links = self.query_download_links(package_uuids=[pkg_uuid])
+                    kept = self._prune_download_links(wanted_links, dl_links)
+                    if kept:
+                        return packages
                 return packages
-            lg_packages = self.query_linkgrabber_packages(package_name=package_name)
-            pkg_ids = _as_int_list([p.get("uuid") for p in lg_packages])
-            link_ids = _as_int_list([link.get("uuid") for link in wanted_links])
-            try:
-                if link_ids:
+            if link_ids:
+                try:
                     self.move_to_downloadlist(link_ids=link_ids)
-                elif pkg_ids:
-                    self.move_to_downloadlist(package_ids=pkg_ids)
-            except Exception as exc:
-                logger.debug("JD2 promote %s: %s", package_name, exc)
+                except Exception as exc:
+                    logger.debug("JD2 promote %s by link: %s", package_name, exc)
+            else:
+                lg_packages = self.query_linkgrabber_packages(package_name=package_name)
+                pkg_ids = _as_int_list([p.get("uuid") for p in lg_packages])
+                if pkg_ids:
+                    try:
+                        self.move_to_downloadlist(package_ids=pkg_ids)
+                    except Exception as exc:
+                        logger.debug("JD2 promote %s by package: %s", package_name, exc)
             time.sleep(self.poll_interval_sec)
         return []
 
@@ -501,15 +625,22 @@ class JDownloaderClient:
         *,
         download_password: str = "",
         crawl_timeout_sec: int = 600,
+        expected_size: int | None = None,
     ) -> None:
-        """Crawl in linkgrabber, promote to downloads, and press Play via API."""
+        """Crawl one file in linkgrabber, move only that link to downloads, start."""
+        if self._resume_existing_package(
+            package_name, url, expected_size=expected_size
+        ):
+            return
+
         self.clear_package(package_name)
+        self.clear_gofile_url(url)
 
         crawl_job_id = self.add_links(
             url,
             package_name=package_name,
             destination_folder=destination_folder,
-            autostart=True,
+            autostart=False,
             download_password=download_password,
         )
 
@@ -518,9 +649,13 @@ class JDownloaderClient:
             job_id=crawl_job_id,
             timeout_sec=crawl_timeout_sec,
         )
-        wanted = filter_links_for_url(url, links)
+        wanted = filter_links_for_url(url, links, expected_size=expected_size)
+        if not wanted:
+            raise RuntimeError(
+                f"JD2 crawl for {package_name} matched 0 links for {url[:80]}"
+            )
         logger.info(
-            "JD2 linkgrabber ready: %s (%d links, %d wanted)",
+            "JD2 linkgrabber ready: %s (%d crawled, %d wanted)",
             package_name,
             len(links),
             len(wanted),
@@ -535,17 +670,21 @@ class JDownloaderClient:
             )
 
         self.ensure_downloads_running()
-        pkg_ids = _as_int_list([p.get("uuid") for p in packages])
         link_ids = _as_int_list([link.get("uuid") for link in wanted])
         if link_ids:
             self.force_download(link_ids=link_ids)
-        elif pkg_ids:
-            self.force_download(package_ids=pkg_ids)
+        else:
+            pkg_ids = _as_int_list([p.get("uuid") for p in packages])
+            if pkg_ids:
+                self.force_download(package_ids=pkg_ids)
 
     def wait_until_package_finished(
         self,
         package_name: str,
         timeout_sec: int = 86400,
+        *,
+        url: str | None = None,
+        expected_size: int | None = None,
     ) -> list[dict[str, Any]]:
         self.ensure_downloads_running()
         deadline = time.time() + timeout_sec
@@ -582,6 +721,10 @@ class JDownloaderClient:
                 if pkg_uuid is not None
                 else []
             )
+            if url and links:
+                wanted = filter_links_for_url(url, links, expected_size=expected_size)
+                if wanted and len(wanted) < len(links):
+                    links = self._prune_download_links(wanted, links)
             if links:
                 failed = [reason for link in links if (reason := _link_failed(link))]
                 if failed:
