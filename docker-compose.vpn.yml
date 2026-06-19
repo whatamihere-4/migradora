@@ -21,4 +21,5 @@ services:
 
   orchestrator:
     environment:
+      # jdownloader shares gluetun's network — use gluetun hostname, not jdownloader
       JD2_HOST: gluetun

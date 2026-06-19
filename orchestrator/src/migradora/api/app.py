@@ -101,6 +101,12 @@ def create_app(settings: Settings, orchestrator: Orchestrator) -> FastAPI:
         orchestrator.resume()
         return {"status": "resumed"}
 
+    @app.post("/retry-failed")
+    def retry_failed() -> dict[str, Any]:
+        count = queue.reset_failed_jobs()
+        orchestrator.resume()
+        return {"status": "ok", "reset": count}
+
     @app.post("/pause")
     def pause() -> dict[str, str]:
         orchestrator.pause()

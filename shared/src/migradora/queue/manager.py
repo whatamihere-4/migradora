@@ -226,6 +226,16 @@ class QueueManager:
                     (FileStatus.FAILED.value, error, utc_now(), file_id),
                 )
 
+    def reset_failed_jobs(self) -> int:
+        """Move failed jobs back to pending (clears attempts and last_error)."""
+        with self.connection() as conn:
+            cur = conn.execute(
+                """UPDATE files SET status=?, attempts=0, last_error=NULL, updated_at=?
+                   WHERE status=? AND is_part=0""",
+                (FileStatus.PENDING.value, utc_now(), FileStatus.FAILED.value),
+            )
+            return cur.rowcount
+
     def get_folder_mapping(self, gofile_path: str) -> str | None:
         with self.connection() as conn:
             row = conn.execute(

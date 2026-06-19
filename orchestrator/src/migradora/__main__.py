@@ -50,6 +50,14 @@ def cmd_resume(settings: Settings) -> int:
     return 0
 
 
+def cmd_retry_failed(settings: Settings) -> int:
+    queue = QueueManager(settings.db_path)
+    count = queue.reset_failed_jobs()
+    queue.set_queue_state(QueueState.RUNNING, "")
+    print(json.dumps({"reset": count, "queue_state": "running"}, indent=2))
+    return 0
+
+
 def cmd_run(settings: Settings) -> int:
     run_orchestrator(settings)
     return 0
@@ -62,6 +70,7 @@ def main() -> int:
     sub.add_parser("discover", help="Discover files from Gofile folders and enqueue")
     sub.add_parser("status", help="Show queue status")
     sub.add_parser("resume", help="Resume paused queue")
+    sub.add_parser("retry-failed", help="Reset failed jobs to pending and resume queue")
     sub.add_parser("run", help="Run orchestrator with dashboard")
 
     parser.add_argument("--force", action="store_true", help="Re-enqueue uploaded files (discover)")
@@ -75,6 +84,7 @@ def main() -> int:
         "discover": lambda: cmd_discover(settings, args.force),
         "status": lambda: cmd_status(settings),
         "resume": lambda: cmd_resume(settings),
+        "retry-failed": lambda: cmd_retry_failed(settings),
         "run": lambda: cmd_run(settings),
     }
     return commands[args.command]()
