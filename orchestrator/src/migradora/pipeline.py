@@ -25,7 +25,9 @@ def write_heartbeat(state_dir: str) -> None:
 
 
 def find_completed_file(dest_dir: Path, stable_sec: float = 3.0) -> Path:
-    """Return largest stable file in dest_dir (no .part files)."""
+    """Return largest stable file under dest_dir (searches subdirs). No .part files."""
+    if not dest_dir.is_dir():
+        raise FileNotFoundError(f"Download directory missing: {dest_dir}")
     candidates = [
         p for p in dest_dir.rglob("*")
         if p.is_file() and not p.name.endswith(".part")
@@ -166,20 +168,9 @@ class PipelineCoordinator:
             raise RuntimeError(f"Job {job.id} has no gofile_url")
 
         pkg_name = f"migradora-{job.id}"
-        local_dest = Path(self.settings.download_dir) / str(job.id)
-        jd2_dest = f"{self.settings.jd2_download_dir.rstrip('/')}/{job.id}"
-        # Shared volume: orchestrator must not create root-only dirs JD2 cannot write.
-        if local_dest.exists():
-            try:
-                local_dest.chmod(0o777)
-            except OSError:
-                pass
-        else:
-            local_dest.mkdir(parents=True, exist_ok=True)
-            try:
-                local_dest.chmod(0o777)
-            except OSError:
-                pass
+        # JD2 (UID 1000) must create dirs under /output — do not mkdir from orchestrator (root).
+        jd2_dest = self.settings.jd2_download_dir.rstrip("/")
+        local_dest = Path(self.settings.download_dir) / pkg_name
 
         self._current_phase = "downloading"
         self.queue.update_file(job.id, jd2_package_name=pkg_name)
@@ -190,6 +181,14 @@ class PipelineCoordinator:
             timeout_sec=self.settings.jd2_api_timeout_sec,
             poll_interval_sec=self.settings.jd2_poll_interval_sec,
         ) as jd2:
+            try:
+                stale = jd2.query_download_packages(package_name=pkg_name)
+                stale_ids = _as_int_list([p.get("uuid") for p in stale])
+                if stale_ids:
+                    jd2.remove_downloads(package_ids=stale_ids)
+            except Exception as exc:
+                logger.debug("JD2 stale package cleanup skipped: %s", exc)
+
             jd2.add_links(
                 url,
                 package_name=pkg_name,

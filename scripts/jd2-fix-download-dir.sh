@@ -21,5 +21,7 @@ fi
 chmod -R a+rwX data/downloads 2>/dev/null || true
 
 echo "Patched $CFG (defaultdownloadfolder=/output)"
+echo "If downloads still stall at 0%, fix ownership (JD2 runs as UID 1000):"
+echo "  ./scripts/fix-download-permissions.sh"
 echo "Restart jdownloader, remove failed packages in web UI, then:"
 echo "  docker compose exec orchestrator python -m migradora resume"

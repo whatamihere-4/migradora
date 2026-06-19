@@ -33,8 +33,9 @@ services:
     container_name: migradora-jdownloader
     env_file: .env
     environment:
-      # Allow container to fix ownership of /config on first run
       TAKE_CONFIG_OWNERSHIP: "1"
+      USER_ID: "1000"
+      GROUP_ID: "1000"
     volumes:
       - ./data/jd2/config:/config
       - ./data/downloads:/output
