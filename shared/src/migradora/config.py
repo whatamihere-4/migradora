@@ -66,6 +66,7 @@ class Settings:
     discovery_delay_sec: float = 2.0
 
     # JDownloader2 (local Deprecated API)
+    download_backend: str = "gofile-direct"  # gofile-direct | jd2 | direct
     jd2_host: str = "jdownloader"
     jd2_port: int = 3128
     jd2_download_dir: str = "/output"
@@ -132,6 +133,7 @@ class Settings:
             upload_max_retries=_env_int("UPLOAD_MAX_RETRIES", 5),
             upload_retry_delay_sec=_env_int("UPLOAD_RETRY_DELAY_SEC", 30),
             discovery_delay_sec=float(_env("DISCOVERY_DELAY_SEC", "2")),
+            download_backend=_env("DOWNLOAD_BACKEND", "gofile-direct").lower(),
             filester_storage_pause_pct=float(_env("FILESTER_STORAGE_PAUSE_PCT", "95")),
             jd2_host=_env("JD2_HOST", "jdownloader"),
             jd2_port=_env_int("JD2_PORT", 3128),

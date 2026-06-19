@@ -692,6 +692,46 @@ class JDownloaderClient:
             time.sleep(self.poll_interval_sec)
         return []
 
+    def add_http_download(
+        self,
+        url: str,
+        package_name: str,
+        destination_folder: str,
+    ) -> None:
+        """Add a single HTTP(S) URL to JD2 downloads (no linkgrabber crawl)."""
+        packages = self.query_download_packages(package_name=package_name)
+        if packages:
+            pkg_uuid = _as_int(packages[0].get("uuid"))
+            if pkg_uuid is not None:
+                links = self.query_download_links(package_uuids=[pkg_uuid])
+                if links and not all(link.get("finished") for link in links):
+                    logger.info("JD2 resuming HTTP download %s", package_name)
+                    self.ensure_downloads_running()
+                    link_ids = _as_int_list([link.get("uuid") for link in links])
+                    if link_ids:
+                        self.force_download(link_ids=link_ids)
+                    else:
+                        self.force_download(package_ids=[pkg_uuid])
+                    return
+
+        self.clear_package(package_name)
+        self.add_links(
+            url,
+            package_name=package_name,
+            destination_folder=destination_folder,
+            autostart=True,
+            deep_decrypt=False,
+        )
+        packages = self._wait_for_download_package(package_name, timeout_sec=120.0)
+        if not packages:
+            raise RuntimeError(
+                f"JD2 HTTP download {package_name} never appeared in download list"
+            )
+        self.ensure_downloads_running()
+        pkg_ids = _as_int_list([p.get("uuid") for p in packages])
+        if pkg_ids:
+            self.force_download(package_ids=pkg_ids)
+
     def add_and_start_package(
         self,
         url: str,

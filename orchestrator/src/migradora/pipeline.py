@@ -12,6 +12,7 @@ import httpx
 
 from migradora.config import Settings
 from migradora.filester_client import FilesterClient
+from migradora.gofile_client import GofileClient
 from migradora.jdownloader.client import JDownloaderClient, _as_int_list
 from migradora.models import FileStatus, QueueState
 from migradora.queue.manager import QueueManager
@@ -212,34 +213,13 @@ class PipelineCoordinator:
         self._current_phase = "downloading"
         self.queue.update_file(job.id, jd2_package_name=pkg_name)
 
-        with JDownloaderClient(
-            host=self.settings.jd2_host,
-            port=self.settings.jd2_port,
-            timeout_sec=self.settings.jd2_api_timeout_sec,
-            poll_interval_sec=self.settings.jd2_poll_interval_sec,
-        ) as jd2:
-            jd2.wait_until_healthy(
-                timeout_sec=min(60.0, self.settings.jd2_startup_wait_sec),
-                interval_sec=self.settings.jd2_poll_interval_sec,
-            )
-            jd2.add_and_start_package(
-                url,
-                package_name=pkg_name,
-                destination_folder=jd2_dest,
-                download_password=self.settings.gofile_password,
-                crawl_timeout_sec=self.settings.jd2_crawl_timeout_sec,
-                expected_size=job.size_bytes or None,
-            )
-            links = jd2.wait_until_package_finished(
-                pkg_name,
-                url=url,
-                expected_size=job.size_bytes or None,
-            )
-            # Update size from JD2 if we didn't know it
-            if links and not job.size_bytes:
-                total = sum(int(l.get("bytesTotal") or 0) for l in links)
-                if total:
-                    self.queue.update_file(job.id, status=FileStatus.DOWNLOADING)
+        backend = self.settings.download_backend
+        if backend in ("gofile-direct", "jd2-direct"):
+            self._download_via_gofile_direct(job, url, pkg_name, jd2_dest, local_dest)
+        elif backend == "direct":
+            self._download_via_http(job, url, local_dest)
+        else:
+            self._download_via_jd2_gofile(job, url, pkg_name, jd2_dest)
 
         local_path = find_completed_file(local_dest)
         actual_size = local_path.stat().st_size
@@ -308,3 +288,72 @@ class PipelineCoordinator:
         self._current_phase = "idle"
         self._current_job_id = None
         logger.info("Job %d complete: %s", job.id, job.filename)
+
+    def _download_via_gofile_direct(
+        self, job, url: str, pkg_name: str, jd2_dest: str, local_dest: Path
+    ) -> None:
+        """Resolve Gofile CDN URL via API, download through JD2 as a single HTTP link."""
+        with GofileClient(
+            token=self.settings.gofile_token,
+            password=self.settings.gofile_password,
+        ) as gofile:
+            direct_url = gofile.resolve_direct_link(url)
+        logger.info("Job %d: resolved direct URL for %s", job.id, job.filename)
+
+        with JDownloaderClient(
+            host=self.settings.jd2_host,
+            port=self.settings.jd2_port,
+            timeout_sec=self.settings.jd2_api_timeout_sec,
+            poll_interval_sec=self.settings.jd2_poll_interval_sec,
+        ) as jd2:
+            jd2.wait_until_healthy(
+                timeout_sec=min(60.0, self.settings.jd2_startup_wait_sec),
+                interval_sec=self.settings.jd2_poll_interval_sec,
+            )
+            jd2.add_http_download(direct_url, pkg_name, jd2_dest)
+            jd2.wait_until_package_finished(
+                pkg_name,
+                url=direct_url,
+                expected_size=job.size_bytes or None,
+            )
+
+    def _download_via_http(self, job, url: str, local_dest: Path) -> None:
+        """Download directly with httpx (no JD2)."""
+        dest_file = local_dest / job.filename
+        with GofileClient(
+            token=self.settings.gofile_token,
+            password=self.settings.gofile_password,
+        ) as gofile:
+            gofile.download_file(
+                url,
+                str(dest_file),
+                expected_size=job.size_bytes or None,
+            )
+
+    def _download_via_jd2_gofile(
+        self, job, url: str, pkg_name: str, jd2_dest: str
+    ) -> None:
+        """Legacy path: Gofile page URL through JD2 linkgrabber (often broken)."""
+        with JDownloaderClient(
+            host=self.settings.jd2_host,
+            port=self.settings.jd2_port,
+            timeout_sec=self.settings.jd2_api_timeout_sec,
+            poll_interval_sec=self.settings.jd2_poll_interval_sec,
+        ) as jd2:
+            jd2.wait_until_healthy(
+                timeout_sec=min(60.0, self.settings.jd2_startup_wait_sec),
+                interval_sec=self.settings.jd2_poll_interval_sec,
+            )
+            jd2.add_and_start_package(
+                url,
+                package_name=pkg_name,
+                destination_folder=jd2_dest,
+                download_password=self.settings.gofile_password,
+                crawl_timeout_sec=self.settings.jd2_crawl_timeout_sec,
+                expected_size=job.size_bytes or None,
+            )
+            jd2.wait_until_package_finished(
+                pkg_name,
+                url=url,
+                expected_size=job.size_bytes or None,
+            )
