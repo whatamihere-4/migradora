@@ -14,10 +14,13 @@ find data/downloads -maxdepth 2 -type d 2>/dev/null | while read -r d; do ls -ld
 
 echo
 echo "=== JD2 download controller ==="
-STATE=$(curl -sf http://localhost:3128/downloadcontroller/getCurrentState 2>/dev/null || echo "unavailable")
-SPEED=$(curl -sf http://localhost:3128/downloadcontroller/getSpeedInBps 2>/dev/null || echo "0")
+STATE=$(curl -sf http://localhost:3128/downloadcontroller/getCurrentState | jq -r '.data // .' 2>/dev/null || echo "unavailable")
+SPEED=$(curl -sf http://localhost:3128/downloadcontroller/getSpeedInBps | jq -r '.data // .' 2>/dev/null || echo "0")
 echo "state: $STATE"
 echo "speed_bps: $SPEED"
+if [ "$STATE" = "IDLE" ] || [ "$STATE" = "STOPPED" ]; then
+  echo "NOTE: downloads are not running — orchestrator should call start, or press Play in web UI"
+fi
 
 echo
 echo "=== JD2 linkgrabber (migradora-*) ==="
