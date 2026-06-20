@@ -64,8 +64,8 @@ class Settings:
     upload_retry_delay_sec: int = 30
     discovery_delay_sec: float = 2.0
 
-    # Filester storage guard
-    filester_storage_pause_pct: float = 95.0
+    # Filester account storage guard (0 = disabled; Filester limit is per-file not per-account)
+    filester_storage_pause_pct: float = 0.0
 
     # Dashboard
     dashboard_host: str = "0.0.0.0"
@@ -111,7 +111,7 @@ class Settings:
             upload_max_retries=_env_int("UPLOAD_MAX_RETRIES", 5),
             upload_retry_delay_sec=_env_int("UPLOAD_RETRY_DELAY_SEC", 30),
             discovery_delay_sec=float(_env("DISCOVERY_DELAY_SEC", "2")),
-            filester_storage_pause_pct=float(_env("FILESTER_STORAGE_PAUSE_PCT", "95")),
+            filester_storage_pause_pct=float(_env("FILESTER_STORAGE_PAUSE_PCT", "0")),
             dashboard_host=_env("DASHBOARD_HOST", "0.0.0.0"),
             dashboard_port=_env_int("DASHBOARD_PORT", 8080),
             dashboard_bind_port=_env_int(

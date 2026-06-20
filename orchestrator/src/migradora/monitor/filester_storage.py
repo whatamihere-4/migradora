@@ -33,7 +33,10 @@ class FilesterStorageMonitor:
                 resp.raise_for_status()
                 account = resp.json().get("data", resp.json())
                 used = int(account.get("storage_used", 0))
-                limit = int(account.get("storage_limit", 10 * 1024 ** 3))
+                # Filester's ~10 GB cap is per-file, not total account storage.
+                # Only treat storage_limit from the API as an account cap when present.
+                raw_limit = account.get("storage_limit")
+                limit = int(raw_limit) if raw_limit is not None else 0
                 result = {
                     "storage_used_bytes": used,
                     "storage_limit_bytes": limit,
@@ -59,7 +62,8 @@ class FilesterStorageMonitor:
         stats = self.fetch_storage_stats()
         used = stats.get("storage_used_bytes")
         limit = stats.get("storage_limit_bytes")
-        if used is not None and limit and limit > 0:
+        pause_pct = self.settings.filester_storage_pause_pct
+        if used is not None and limit and limit > 0 and pause_pct > 0:
             pct = (used / limit) * 100
             stats["storage_used_pct"] = round(pct, 1)
             if pct >= self.settings.filester_storage_pause_pct:

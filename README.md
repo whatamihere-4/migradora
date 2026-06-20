@@ -101,7 +101,7 @@ Queue state persists in `data/state/queue.db`. Stale `downloading` jobs reset to
 | `error-notPremium` | Token account needs active premium (subscription or PAYG with credits) |
 | Discover finds 0 files | Check folder is shared; test with `test-gofile-resolve.sh` |
 | Queue paused (disk) | Free space under `data/downloads` |
-| Queue paused (storage) | Filester account full — free space or upgrade |
+| Queue paused (storage) | Only if you set `FILESTER_STORAGE_PAUSE_PCT` and hit an account cap from the API |
 | Download size mismatch | Re-run job: `./scripts/reset-failed-jobs.sh` |
 
 ## License
