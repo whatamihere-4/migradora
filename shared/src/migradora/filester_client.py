@@ -4,12 +4,43 @@ from __future__ import annotations
 
 import logging
 import time
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
 import httpx
 
 logger = logging.getLogger("migradora.filester")
+
+
+@dataclass(frozen=True)
+class FilesterFolder:
+    """Folder refs: identifier is used for uploads; db_id for nested create parent_id."""
+
+    identifier: str
+    name: str
+    db_id: int | None = None
+    parent_db_id: int | None = None
+
+
+class FolderIndex:
+    """Lookup folders by (parent_db_id, name) or identifier."""
+
+    def __init__(self, folders: list[FilesterFolder]) -> None:
+        self._by_key: dict[tuple[int | None, str], FilesterFolder] = {}
+        self._by_identifier: dict[str, FilesterFolder] = {}
+        for folder in folders:
+            self.add(folder)
+
+    def add(self, folder: FilesterFolder) -> None:
+        self._by_key[(folder.parent_db_id, folder.name)] = folder
+        self._by_identifier[folder.identifier] = folder
+
+    def get(self, parent_db_id: int | None, name: str) -> FilesterFolder | None:
+        return self._by_key.get((parent_db_id, name))
+
+    def by_identifier(self, identifier: str) -> FilesterFolder | None:
+        return self._by_identifier.get(identifier)
 
 
 class FilesterClient:
@@ -28,6 +59,7 @@ class FilesterClient:
             headers={"Authorization": f"Bearer {api_key}"},
             timeout=httpx.Timeout(600.0, connect=30.0),
         )
+        self._folder_index: FolderIndex | None = None
 
     def close(self) -> None:
         self._client.close()
@@ -67,26 +99,138 @@ class FilesterClient:
         data = self._request("GET", "/api/v1/account")
         return data.get("data", data)
 
+    @staticmethod
+    def _parse_folder(raw: dict[str, Any]) -> FilesterFolder | None:
+        name = (raw.get("name") or "").strip()
+        if not name:
+            return None
+
+        identifier = raw.get("identifier") or raw.get("slug") or ""
+        db_id: int | None = None
+        for key in ("id", "ID", "folder_id"):
+            value = raw.get(key)
+            if isinstance(value, int):
+                db_id = value
+                if not identifier:
+                    identifier = str(value)
+                break
+
+        if not identifier:
+            value = raw.get("id")
+            if isinstance(value, str) and value:
+                identifier = value
+
+        if not identifier:
+            return None
+
+        parent_raw = raw.get("parent_id")
+        parent_db_id: int | None = None
+        if isinstance(parent_raw, int) and parent_raw > 0:
+            parent_db_id = parent_raw
+
+        return FilesterFolder(
+            identifier=str(identifier),
+            name=name,
+            db_id=db_id,
+            parent_db_id=parent_db_id,
+        )
+
     def list_folders(self) -> list[dict[str, Any]]:
         data = self._request("GET", "/api/v1/folders")
         return data.get("data", [])
+
+    def _load_folders(self) -> list[FilesterFolder]:
+        folders: list[FilesterFolder] = []
+        seen: set[str] = set()
+
+        for raw in self.list_folders():
+            folder = self._parse_folder(raw)
+            if folder and folder.identifier not in seen:
+                folders.append(folder)
+                seen.add(folder.identifier)
+
+        try:
+            data = self._request("GET", "/api/user/folders")
+        except httpx.HTTPError:
+            return folders
+
+        for raw in data.get("folders") or []:
+            folder = self._parse_folder(raw)
+            if folder and folder.identifier not in seen:
+                folders.append(folder)
+                seen.add(folder.identifier)
+
+        self._walk_hierarchical(data.get("hierarchical") or [], None, folders, seen)
+        return folders
+
+    def _walk_hierarchical(
+        self,
+        nodes: list[dict[str, Any]],
+        parent_db_id: int | None,
+        out: list[FilesterFolder],
+        seen: set[str],
+    ) -> None:
+        for raw in nodes:
+            parsed = self._parse_folder(raw)
+            if not parsed:
+                continue
+            folder = parsed
+            if folder.parent_db_id is None and parent_db_id is not None:
+                folder = FilesterFolder(
+                    identifier=folder.identifier,
+                    name=folder.name,
+                    db_id=folder.db_id,
+                    parent_db_id=parent_db_id,
+                )
+            if folder.identifier not in seen:
+                out.append(folder)
+                seen.add(folder.identifier)
+            child_parent = folder.db_id
+            subs = raw.get("subfolders") or []
+            if subs:
+                self._walk_hierarchical(subs, child_parent, out, seen)
+
+    def folder_index(self, *, refresh: bool = False) -> FolderIndex:
+        if self._folder_index is None or refresh:
+            self._folder_index = FolderIndex(self._load_folders())
+        return self._folder_index
 
     def create_folder(
         self,
         name: str,
         *,
-        parent_id: str | None = None,
+        parent_db_id: int | None = None,
         public: int = 1,
-    ) -> str:
+    ) -> FilesterFolder:
         payload: dict[str, object] = {"name": name[:100], "public": public}
-        if parent_id:
-            payload["parent_id"] = parent_id
-        data = self._request("POST", "/api/v1/folder", json=payload)
-        folder = data.get("data", {})
-        folder_id = folder.get("identifier") or folder.get("id", "")
-        if not folder_id:
-            raise RuntimeError(f"Failed to create folder {name}: {data}")
-        return str(folder_id)
+        if parent_db_id:
+            payload["parent_id"] = parent_db_id
+
+        last_error: Exception | None = None
+        for endpoint in ("/api/v1/folder", "/api/folder/create"):
+            try:
+                data = self._request("POST", endpoint, json=payload)
+                folder = self._parse_folder(data.get("data", {}))
+                if folder:
+                    if self._folder_index is not None:
+                        self._folder_index.add(folder)
+                    return folder
+                identifier = (data.get("data") or {}).get("identifier", "")
+                if identifier:
+                    created = FilesterFolder(
+                        identifier=str(identifier),
+                        name=name,
+                        db_id=None,
+                        parent_db_id=parent_db_id,
+                    )
+                    if self._folder_index is not None:
+                        self._folder_index.add(created)
+                    return created
+            except httpx.HTTPError as exc:
+                last_error = exc
+                logger.debug("Filester %s failed for %r: %s", endpoint, name, exc)
+
+        raise RuntimeError(f"Failed to create folder {name!r}: {last_error}")
 
     def upload_file(self, file_path: str | Path, folder_id: str | None = None) -> dict[str, Any]:
         file_path = Path(file_path)

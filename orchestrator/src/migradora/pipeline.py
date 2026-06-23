@@ -16,7 +16,7 @@ from migradora.queue.manager import QueueManager
 from migradora.splitter import split_file
 from migradora.utils import free_disk_gb
 
-from migradora.filester_folders import ensure_filester_folder_path
+from migradora.filester_folders import CachedFolder, ensure_filester_folder_path
 
 logger = logging.getLogger("migradora.pipeline")
 
@@ -40,7 +40,7 @@ class PipelineCoordinator:
         self._current_job_id: int | None = None
         self._current_phase: str = "idle"
         self._current_job_name: str = ""
-        self._folder_cache: dict[str, str] = {}
+        self._folder_cache: dict[str, CachedFolder] = {}
         self._progress_bytes: int = 0
         self._progress_total: int = 0
         self._last_touch_at: float = 0.0

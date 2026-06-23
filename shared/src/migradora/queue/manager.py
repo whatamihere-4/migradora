@@ -261,12 +261,18 @@ class QueueManager:
             return cur.rowcount
 
     def get_folder_mapping(self, gofile_path: str) -> str | None:
+        record = self.get_folder_mapping_record(gofile_path)
+        return record[0] if record else None
+
+    def get_folder_mapping_record(self, gofile_path: str) -> tuple[str, str] | None:
         with self.connection() as conn:
             row = conn.execute(
-                "SELECT filester_folder_id FROM folders WHERE gofile_path = ?",
+                "SELECT filester_folder_id, filester_folder_name FROM folders WHERE gofile_path = ?",
                 (gofile_path,),
             ).fetchone()
-            return row["filester_folder_id"] if row else None
+            if not row:
+                return None
+            return row["filester_folder_id"], row["filester_folder_name"] or ""
 
     def save_folder_mapping(
         self, gofile_path: str, filester_folder_id: str, filester_folder_name: str
@@ -278,6 +284,14 @@ class QueueManager:
                    VALUES (?, ?, ?, ?)""",
                 (gofile_path, filester_folder_id, filester_folder_name, utc_now()),
             )
+
+    def clear_flat_folder_mappings(self) -> int:
+        """Remove cached mappings from the old flat-folder fallback (names with ' / ')."""
+        with self.connection() as conn:
+            cur = conn.execute(
+                "DELETE FROM folders WHERE instr(filester_folder_name, ' / ') > 0"
+            )
+            return cur.rowcount
 
     def get_stats(self) -> QueueStats:
         with self.connection() as conn:
