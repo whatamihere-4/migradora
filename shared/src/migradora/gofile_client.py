@@ -7,7 +7,8 @@ import logging
 import time
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Iterator
+from collections.abc import Callable, Iterator
+from typing import Any
 from urllib.parse import parse_qs, quote, urlparse
 
 import httpx
@@ -222,6 +223,7 @@ class GofileClient:
         *,
         expected_size: int | None = None,
         throttle_kbps: int = 0,
+        on_progress: Callable[[int, int | None], None] | None = None,
     ) -> str:
         """Download with resume support (.part file)."""
         direct = self.resolve_direct_link(gofile_url)
@@ -246,6 +248,8 @@ class GofileClient:
             with part.open(mode) as fh:
                 for chunk in resp.iter_bytes(chunk_size=1024 * 1024):
                     fh.write(chunk)
+                    if on_progress:
+                        on_progress(part.stat().st_size, expected_size)
                     if throttle_kbps > 0:
                         time.sleep(len(chunk) / (throttle_kbps * 1024))
 

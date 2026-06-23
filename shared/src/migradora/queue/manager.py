@@ -293,14 +293,29 @@ class QueueManager:
         with self.connection() as conn:
             if status:
                 rows = conn.execute(
-                    "SELECT * FROM files WHERE status=? ORDER BY id DESC LIMIT ?",
+                    "SELECT * FROM files WHERE status=? ORDER BY id ASC LIMIT ?",
                     (status, limit),
                 ).fetchall()
             else:
                 rows = conn.execute(
-                    "SELECT * FROM files ORDER BY id DESC LIMIT ?", (limit,)
+                    "SELECT * FROM files ORDER BY id ASC LIMIT ?", (limit,)
                 ).fetchall()
             return [FileRecord.from_row(r) for r in rows]
+
+    def reset_active_jobs(self) -> int:
+        """Return stuck downloading/uploading jobs to pending (e.g. after crash)."""
+        with self.connection() as conn:
+            cur = conn.execute(
+                """UPDATE files SET status=?, updated_at=?
+                   WHERE is_part=0 AND status IN (?, ?)""",
+                (
+                    FileStatus.PENDING.value,
+                    utc_now(),
+                    FileStatus.DOWNLOADING.value,
+                    FileStatus.UPLOADING.value,
+                ),
+            )
+            return cur.rowcount
 
     def reset_stale_jobs(self, timeout_sec: int) -> int:
         with self.connection() as conn:

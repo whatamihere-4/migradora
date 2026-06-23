@@ -203,20 +203,34 @@
         `${pct}% complete · ${fmtBytes(stats.uploaded_bytes)} / ${fmtBytes(stats.total_bytes)} uploaded`;
     }
 
-    function renderJobs(jobs) {
+    function renderJobs(jobs, pipeline) {
       const list = document.getElementById('jobs-list');
       const filtered = activeFilter === 'all' ? jobs : jobs.filter(j => j.status === activeFilter);
-      if (!filtered.length) {
+      const sorted = [...filtered].sort((a, b) => a.id - b.id);
+      if (!sorted.length) {
         list.innerHTML = '<div class="empty">No jobs in this filter</div>';
         return;
       }
-      list.innerHTML = filtered.map(j => {
-        const active = ['downloading','uploading','pending'].includes(j.status);
+      const currentId = pipeline && pipeline.current_job_id;
+      const progBytes = pipeline && pipeline.progress_bytes || 0;
+      const progTotal = pipeline && pipeline.progress_total || 0;
+      list.innerHTML = sorted.map(j => {
+        const isCurrent = currentId === j.id;
+        const isActive = isCurrent && (j.status === 'downloading' || j.status === 'uploading');
         const parts = (j.filester_slug || []).length;
         const partHint = parts > 1 ? ` (${parts} parts)` : parts === 1 ? '' : '';
         const links = (j.filester_slug || []).map(s =>
           `<a href="https://filester.me/d/${esc(s)}" target="_blank">${esc(s)}</a>`
         ).join(' · ');
+        let progressHtml = '';
+        if (isActive && progTotal > 0) {
+          const pct = Math.min(100, Math.round((progBytes / progTotal) * 100));
+          progressHtml = `<div class="progress-wrap"><div class="progress-bar" style="width:${pct}%"></div></div>
+            <div class="meta" style="margin-top:0.25rem">${pct}% · ${fmtBytes(progBytes)} / ${fmtBytes(progTotal)}</div>`;
+        } else if (isActive) {
+          progressHtml = `<div class="progress-wrap"><div class="progress-bar indeterminate"></div></div>
+            <div class="meta" style="margin-top:0.25rem">Starting…</div>`;
+        }
         return `<div class="job">
           <div class="job-header">
             <div>
@@ -227,7 +241,7 @@
               ${links ? `<div class="job-links">${links}</div>` : ''}
             </div>
           </div>
-          ${active ? '<div class="progress-wrap"><div class="progress-bar indeterminate"></div></div>' : ''}
+          ${progressHtml}
         </div>`;
       }).join('');
     }
@@ -236,7 +250,7 @@
       try {
         const [status, jobsResp] = await Promise.all([
           api('/status'),
-          api('/jobs?limit=200' + (activeFilter !== 'all' ? '&status=' + activeFilter : '')),
+          api('/jobs?limit=500' + (activeFilter !== 'all' ? '&status=' + activeFilter : '')),
         ]);
         const st = status.stats || {};
         renderStats(st);
@@ -247,11 +261,15 @@
         document.getElementById('queue-meta').innerHTML = status.pause_reason
           ? `<strong>Paused:</strong> ${esc(status.pause_reason)}` : '';
         const p = status.pipeline || {};
-        document.getElementById('pipeline-meta').innerHTML = p.phase && p.phase !== 'idle'
+        const phaseLabel = p.phase && p.phase !== 'idle'
           ? `<strong>${esc(p.phase)}</strong>${p.current_job_name ? ' — ' + esc(p.current_job_name) : ''} (job #${p.current_job_id || '?'})`
           : 'Idle — waiting for work';
-        renderJobs(jobsResp.jobs || []);
-        const active = (st.downloading||0) + (st.uploading||0) + (st.pending||0);
+        const progLabel = p.progress_total > 0 && p.phase !== 'idle'
+          ? `<br>${Math.round((p.progress_bytes / p.progress_total) * 100)}% · ${fmtBytes(p.progress_bytes)} / ${fmtBytes(p.progress_total)}`
+          : '';
+        document.getElementById('pipeline-meta').innerHTML = phaseLabel + progLabel;
+        renderJobs(jobsResp.jobs || [], p);
+        const active = (st.downloading||0) + (st.uploading||0);
         scheduleRefresh(active > 0 ? 1500 : 4000);
       } catch (e) {
         document.getElementById('jobs-list').innerHTML = `<div class="empty">Error: ${esc(e.message)}</div>`;

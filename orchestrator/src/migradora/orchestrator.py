@@ -85,6 +85,9 @@ def run_orchestrator(settings: Settings | None = None) -> None:
         logger.warning("GOFILE_FOLDER_URLS is empty — run discover after adding folder links")
 
     orch = Orchestrator(settings)
+    reset = orch.queue.reset_active_jobs()
+    if reset:
+        logger.warning("Reset %d orphaned downloading/uploading job(s) to pending", reset)
     state, reason = orch.queue.get_queue_state()
     if state == QueueState.PAUSED_TRAFFIC:
         logger.warning(

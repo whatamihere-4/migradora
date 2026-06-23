@@ -41,6 +41,8 @@ class PipelineCoordinator:
         self._current_phase: str = "idle"
         self._current_job_name: str = ""
         self._folder_cache: dict[str, str] = {}
+        self._progress_bytes: int = 0
+        self._progress_total: int = 0
 
     @property
     def status(self) -> dict:
@@ -48,6 +50,8 @@ class PipelineCoordinator:
             "current_job_id": self._current_job_id,
             "current_job_name": self._current_job_name,
             "phase": self._current_phase,
+            "progress_bytes": self._progress_bytes,
+            "progress_total": self._progress_total,
         }
 
     def stop(self) -> None:
@@ -85,6 +89,8 @@ class PipelineCoordinator:
                 self._process_job(job)
             except Exception as exc:
                 logger.error("Pipeline failed for job %d: %s", job.id, exc)
+                self._progress_bytes = 0
+                self._progress_total = 0
                 if job.attempts >= self.settings.download_max_retries:
                     self.queue.mark_failed(job.id, str(exc), retry=False)
                 else:
@@ -102,6 +108,14 @@ class PipelineCoordinator:
         job_dir.mkdir(parents=True, exist_ok=True)
 
         self._current_phase = "downloading"
+        self._progress_bytes = 0
+        self._progress_total = job.size_bytes or 0
+
+        def on_download_progress(done: int, total: int | None) -> None:
+            self._progress_bytes = done
+            if total:
+                self._progress_total = total
+
         with GofileClient(
             token=self.settings.gofile_token,
             password=self.settings.gofile_password,
@@ -112,6 +126,7 @@ class PipelineCoordinator:
                 str(dest),
                 expected_size=job.size_bytes or None,
                 throttle_kbps=self.settings.download_throttle_kbps,
+                on_progress=on_download_progress,
             )
 
         local_path = dest
@@ -131,6 +146,9 @@ class PipelineCoordinator:
         )
 
         self._current_phase = "uploading"
+        self._progress_bytes = 0
+        self._progress_total = local_path.stat().st_size
+        self.queue.update_file(job.id, status=FileStatus.UPLOADING)
         parts = split_file(
             local_path,
             job_dir,
@@ -150,6 +168,8 @@ class PipelineCoordinator:
             )
             for part in parts:
                 part_path = Path(part["path"])
+                self._progress_bytes = 0
+                self._progress_total = part["size_bytes"]
                 logger.info("Uploading %s (%d bytes)", part["filename"], part["size_bytes"])
                 result = filester.upload_file(part_path, folder_id=folder_id)
                 slug = result.get("slug", "")
@@ -171,4 +191,6 @@ class PipelineCoordinator:
         self._current_phase = "idle"
         self._current_job_id = None
         self._current_job_name = ""
+        self._progress_bytes = 0
+        self._progress_total = 0
         logger.info("Job %d complete: %s", job.id, job.filename)

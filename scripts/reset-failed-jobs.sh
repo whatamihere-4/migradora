@@ -9,7 +9,7 @@ db = Path('/data/state/queue.db')
 conn = sqlite3.connect(db)
 cur = conn.execute(
     \"\"\"UPDATE files SET status='pending', attempts=0, last_error=NULL
-       WHERE is_part=0 AND status IN ('failed', 'downloading')\"\"\"
+       WHERE is_part=0 AND status IN ('failed', 'downloading', 'uploading')\"\"\"
 )
 conn.execute(\"UPDATE queue_control SET state='running', pause_reason='' WHERE id=1\")
 conn.commit()

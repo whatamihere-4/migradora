@@ -53,8 +53,9 @@ def cmd_resume(settings: Settings) -> int:
 def cmd_retry_failed(settings: Settings) -> int:
     queue = QueueManager(settings.db_path)
     count = queue.reset_failed_jobs()
+    active = queue.reset_active_jobs()
     queue.set_queue_state(QueueState.RUNNING, "")
-    print(json.dumps({"reset": count, "queue_state": "running"}, indent=2))
+    print(json.dumps({"reset": count, "reset_active": active, "queue_state": "running"}, indent=2))
     return 0
 
 
