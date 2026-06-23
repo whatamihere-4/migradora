@@ -16,6 +16,8 @@ from migradora.queue.manager import QueueManager
 from migradora.splitter import split_file
 from migradora.utils import free_disk_gb
 
+from migradora.filester_folders import ensure_filester_folder_path
+
 logger = logging.getLogger("migradora.pipeline")
 
 
@@ -30,31 +32,6 @@ def cleanup_dir(path: Path) -> None:
         shutil.rmtree(path, ignore_errors=True)
 
 
-def ensure_filester_folder(
-    client: FilesterClient,
-    queue: QueueManager,
-    settings: Settings,
-    parent_folder_path: str,
-    cache: dict[str, str],
-) -> str | None:
-    if not parent_folder_path:
-        root_id = queue.get_folder_mapping("__root__")
-        if root_id:
-            return root_id
-        root_id = client.create_folder(settings.filester_root_folder_name)
-        queue.save_folder_mapping("__root__", root_id, settings.filester_root_folder_name)
-        cache["__root__"] = root_id
-        return root_id
-    existing = queue.get_folder_mapping(parent_folder_path)
-    if existing:
-        return existing
-    folder_name = parent_folder_path.replace("/", " - ")[-100:]
-    folder_id = client.create_folder(folder_name)
-    queue.save_folder_mapping(parent_folder_path, folder_id, folder_name)
-    cache[parent_folder_path] = folder_id
-    return folder_id
-
-
 class PipelineCoordinator:
     def __init__(self, settings: Settings, queue: QueueManager) -> None:
         self.settings = settings
@@ -62,12 +39,14 @@ class PipelineCoordinator:
         self._stop = threading.Event()
         self._current_job_id: int | None = None
         self._current_phase: str = "idle"
+        self._current_job_name: str = ""
         self._folder_cache: dict[str, str] = {}
 
     @property
     def status(self) -> dict:
         return {
             "current_job_id": self._current_job_id,
+            "current_job_name": self._current_job_name,
             "phase": self._current_phase,
         }
 
@@ -101,6 +80,7 @@ class PipelineCoordinator:
                 continue
 
             self._current_job_id = job.id
+            self._current_job_name = job.filename
             try:
                 self._process_job(job)
             except Exception as exc:
@@ -165,7 +145,7 @@ class PipelineCoordinator:
             max_retries=self.settings.upload_max_retries,
             retry_delay=self.settings.upload_retry_delay_sec,
         ) as filester:
-            folder_id = ensure_filester_folder(
+            folder_id = ensure_filester_folder_path(
                 filester, self.queue, self.settings, job.parent_folder_path, self._folder_cache
             )
             for part in parts:
@@ -190,4 +170,5 @@ class PipelineCoordinator:
         )
         self._current_phase = "idle"
         self._current_job_id = None
+        self._current_job_name = ""
         logger.info("Job %d complete: %s", job.id, job.filename)

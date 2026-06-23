@@ -7,12 +7,15 @@ from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
 from fastapi import FastAPI, Query
+from fastapi.responses import HTMLResponse
 
 from migradora.config import Settings
 from migradora.queue.manager import QueueManager
 
 if TYPE_CHECKING:
     from migradora.orchestrator import Orchestrator
+
+_DASHBOARD_HTML = Path(__file__).resolve().parents[3] / "templates" / "dashboard.html"
 
 
 def _heartbeat_age(state_dir: str, service: str) -> float | None:
@@ -28,6 +31,10 @@ def _heartbeat_age(state_dir: str, service: str) -> float | None:
 def create_app(settings: Settings, orchestrator: Orchestrator) -> FastAPI:
     app = FastAPI(title="Migradora", version="3.0.0", description="Gofile → Filester mirror")
     queue = QueueManager(settings.db_path)
+
+    @app.get("/", response_class=HTMLResponse)
+    def dashboard() -> HTMLResponse:
+        return HTMLResponse(_DASHBOARD_HTML.read_text(encoding="utf-8"))
 
     @app.get("/health")
     def health() -> dict[str, Any]:
@@ -89,6 +96,7 @@ def create_app(settings: Settings, orchestrator: Orchestrator) -> FastAPI:
                     "id": r.id,
                     "filename": r.filename,
                     "gofile_path": r.gofile_path,
+                    "parent_folder_path": r.parent_folder_path,
                     "gofile_url": r.gofile_url,
                     "size_bytes": r.size_bytes,
                     "status": r.status.value,

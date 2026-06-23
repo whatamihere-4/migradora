@@ -1,0 +1,275 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Migradora</title>
+  <style>
+    *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+    :root {
+      --bg: #0e0e10;
+      --surface: #18181b;
+      --border: #2d2d33;
+      --accent: #6d5dfc;
+      --accent-hover: #8577fd;
+      --text: #e4e4e7;
+      --muted: #71717a;
+      --success: #22c55e;
+      --error: #ef4444;
+      --warn: #f59e0b;
+      --radius: 10px;
+    }
+    body {
+      font-family: 'Segoe UI', system-ui, -apple-system, sans-serif;
+      background: var(--bg);
+      color: var(--text);
+      min-height: 100vh;
+      padding: 2rem 1rem 3rem;
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+    }
+    h1 { font-size: 2rem; font-weight: 700; margin-bottom: 0.25rem; }
+    .subtitle { color: var(--muted); font-size: 0.9rem; margin-bottom: 1.5rem; text-align: center; }
+    .wrap { width: 100%; max-width: 900px; }
+    .card {
+      background: var(--surface);
+      border: 1px solid var(--border);
+      border-radius: var(--radius);
+      padding: 1.25rem 1.5rem;
+      margin-bottom: 1rem;
+    }
+    .card h2 { font-size: 0.95rem; font-weight: 600; margin-bottom: 0.85rem; }
+    .stats-grid {
+      display: grid;
+      grid-template-columns: repeat(auto-fit, minmax(110px, 1fr));
+      gap: 0.75rem;
+    }
+    .stat {
+      background: var(--bg);
+      border: 1px solid var(--border);
+      border-radius: 8px;
+      padding: 0.75rem;
+      text-align: center;
+    }
+    .stat .val { font-size: 1.35rem; font-weight: 700; }
+    .stat .lbl { font-size: 0.7rem; color: var(--muted); text-transform: uppercase; letter-spacing: 0.04em; margin-top: 0.2rem; }
+    .stat.ok .val { color: var(--success); }
+    .stat.warn .val { color: var(--warn); }
+    .stat.err .val { color: var(--error); }
+    .row { display: flex; flex-wrap: wrap; gap: 0.5rem; align-items: center; margin-top: 0.75rem; }
+    .btn {
+      padding: 0.55rem 1rem; font-size: 0.82rem; font-weight: 600;
+      border: none; border-radius: 6px; cursor: pointer; color: #fff;
+      background: var(--accent); transition: background 0.15s;
+    }
+    .btn:hover { background: var(--accent-hover); }
+    .btn:disabled { opacity: 0.5; cursor: not-allowed; }
+    .btn.secondary { background: transparent; border: 1px solid var(--border); color: var(--text); }
+    .btn.secondary:hover { border-color: var(--accent); }
+    .pill {
+      display: inline-block; padding: 0.2rem 0.55rem; border-radius: 999px;
+      font-size: 0.75rem; font-weight: 600; text-transform: uppercase;
+    }
+    .pill.running { background: rgba(34,197,94,0.15); color: var(--success); }
+    .pill.paused { background: rgba(245,158,11,0.15); color: var(--warn); }
+    .pill.failed { background: rgba(239,68,68,0.15); color: var(--error); }
+    .meta { font-size: 0.82rem; color: var(--muted); line-height: 1.5; }
+    .meta strong { color: var(--text); font-weight: 600; }
+    .progress-wrap { width: 100%; height: 6px; background: var(--bg); border-radius: 3px; overflow: hidden; margin-top: 0.5rem; }
+    .progress-bar { height: 100%; background: var(--accent); border-radius: 3px; transition: width 0.4s ease; width: 0%; }
+    .progress-bar.indeterminate { width: 30%; animation: indeterminate 1.5s ease-in-out infinite; }
+    @keyframes indeterminate {
+      0% { margin-left: 0%; width: 30%; }
+      50% { margin-left: 40%; width: 30%; }
+      100% { margin-left: 0%; width: 30%; }
+    }
+    .job {
+      background: var(--surface); border: 1px solid var(--border);
+      border-radius: var(--radius); padding: 1rem 1.15rem; margin-bottom: 0.65rem;
+      font-size: 0.85rem;
+    }
+    .job-header { display: flex; justify-content: space-between; gap: 0.75rem; align-items: flex-start; }
+    .job-title { font-weight: 600; word-break: break-word; flex: 1; }
+    .job-folder { font-size: 0.75rem; color: var(--accent); margin: 0.25rem 0; }
+    .job-status { color: var(--muted); margin-top: 0.35rem; }
+    .job-status.uploaded { color: var(--success); }
+    .job-status.failed { color: var(--error); }
+    .job-status.downloading, .job-status.uploading { color: var(--accent); }
+    .job-error { margin-top: 0.4rem; font-size: 0.78rem; color: var(--error); word-break: break-word; }
+    .job-links { margin-top: 0.35rem; font-size: 0.78rem; }
+    .job-links a { color: var(--accent); text-decoration: none; }
+    .job-links a:hover { text-decoration: underline; }
+    .empty { text-align: center; color: var(--muted); padding: 2rem; font-size: 0.85rem; }
+    .filter-row { display: flex; gap: 0.4rem; flex-wrap: wrap; margin-bottom: 0.75rem; }
+    .filter-row button { padding: 0.35rem 0.65rem; font-size: 0.75rem; }
+    .filter-row button.active { background: var(--accent); color: #fff; border: none; border-radius: 6px; }
+    .filter-row button:not(.active) { background: transparent; border: 1px solid var(--border); color: var(--muted); border-radius: 6px; cursor: pointer; }
+  </style>
+</head>
+<body>
+  <div class="wrap">
+    <h1>Migradora</h1>
+    <p class="subtitle">Gofile → Filester mirror &mdash; queue monitor</p>
+
+    <div class="card">
+      <h2>Queue</h2>
+      <div class="row">
+        <span class="pill running" id="queue-pill">—</span>
+        <span class="meta" id="queue-meta"></span>
+      </div>
+      <div class="progress-wrap" style="margin-top:0.85rem">
+        <div class="progress-bar" id="overall-progress" style="width:0%"></div>
+      </div>
+      <div class="meta" id="progress-detail" style="margin-top:0.35rem"></div>
+      <div class="stats-grid" style="margin-top:1rem" id="stats-grid"></div>
+      <div class="row">
+        <button class="btn" id="btn-resume">Resume</button>
+        <button class="btn secondary" id="btn-pause">Pause</button>
+        <button class="btn secondary" id="btn-retry">Retry failed</button>
+        <button class="btn secondary" id="btn-discover">Discover</button>
+      </div>
+    </div>
+
+    <div class="card">
+      <h2>Pipeline</h2>
+      <div class="meta" id="pipeline-meta">—</div>
+    </div>
+
+    <div class="card">
+      <h2>Jobs</h2>
+      <div class="filter-row" id="filters"></div>
+      <div id="jobs-list"><div class="empty">Loading…</div></div>
+    </div>
+  </div>
+
+  <script>
+    const FILTERS = ['all', 'pending', 'downloading', 'uploading', 'uploaded', 'failed'];
+    let activeFilter = 'all';
+    let refreshTimer = null;
+
+    function esc(s) {
+      return String(s ?? '').replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;');
+    }
+
+    function fmtBytes(n) {
+      n = Number(n) || 0;
+      if (n >= 1e12) return (n/1e12).toFixed(2) + ' TB';
+      if (n >= 1e9) return (n/1e9).toFixed(2) + ' GB';
+      if (n >= 1e6) return (n/1e6).toFixed(1) + ' MB';
+      if (n >= 1e3) return (n/1e3).toFixed(0) + ' KB';
+      return n + ' B';
+    }
+
+    async function api(path, opts) {
+      const r = await fetch(path, opts);
+      if (!r.ok) throw new Error(await r.text());
+      return r.json();
+    }
+
+    async function post(path) {
+      return api(path, { method: 'POST' });
+    }
+
+    function scheduleRefresh(ms) {
+      clearTimeout(refreshTimer);
+      refreshTimer = setTimeout(refresh, ms);
+    }
+
+    function renderFilters() {
+      const el = document.getElementById('filters');
+      el.innerHTML = FILTERS.map(f =>
+        `<button class="${f === activeFilter ? 'active' : ''}" data-f="${f}">${f}</button>`
+      ).join('');
+      el.querySelectorAll('button').forEach(btn => {
+        btn.onclick = () => { activeFilter = btn.dataset.f; renderFilters(); refresh(); };
+      });
+    }
+
+    function renderStats(stats) {
+      const items = [
+        ['Total', stats.total, ''],
+        ['Pending', stats.pending, stats.pending ? 'warn' : ''],
+        ['Active', (stats.downloading||0) + (stats.uploading||0), ''],
+        ['Uploaded', stats.uploaded, 'ok'],
+        ['Failed', stats.failed, stats.failed ? 'err' : ''],
+      ];
+      document.getElementById('stats-grid').innerHTML = items.map(([l,v,c]) =>
+        `<div class="stat ${c}"><div class="val">${v}</div><div class="lbl">${l}</div></div>`
+      ).join('');
+      const pct = stats.completion_pct || 0;
+      document.getElementById('overall-progress').style.width = pct + '%';
+      document.getElementById('progress-detail').textContent =
+        `${pct}% complete · ${fmtBytes(stats.uploaded_bytes)} / ${fmtBytes(stats.total_bytes)} uploaded`;
+    }
+
+    function renderJobs(jobs) {
+      const list = document.getElementById('jobs-list');
+      const filtered = activeFilter === 'all' ? jobs : jobs.filter(j => j.status === activeFilter);
+      if (!filtered.length) {
+        list.innerHTML = '<div class="empty">No jobs in this filter</div>';
+        return;
+      }
+      list.innerHTML = filtered.map(j => {
+        const active = ['downloading','uploading','pending'].includes(j.status);
+        const parts = (j.filester_slug || []).length;
+        const partHint = parts > 1 ? ` (${parts} parts)` : parts === 1 ? '' : '';
+        const links = (j.filester_slug || []).map(s =>
+          `<a href="https://filester.me/d/${esc(s)}" target="_blank">${esc(s)}</a>`
+        ).join(' · ');
+        return `<div class="job">
+          <div class="job-header">
+            <div>
+              <div class="job-title">#${j.id} ${esc(j.filename)}${partHint}</div>
+              ${j.gofile_path ? `<div class="job-folder">${esc(j.gofile_path)}</div>` : ''}
+              <div class="job-status ${esc(j.status)}">${esc(j.status)} · ${fmtBytes(j.size_bytes)}${j.attempts > 1 ? ' · attempt ' + j.attempts : ''}</div>
+              ${j.last_error ? `<div class="job-error">${esc(j.last_error)}</div>` : ''}
+              ${links ? `<div class="job-links">${links}</div>` : ''}
+            </div>
+          </div>
+          ${active ? '<div class="progress-wrap"><div class="progress-bar indeterminate"></div></div>' : ''}
+        </div>`;
+      }).join('');
+    }
+
+    async function refresh() {
+      try {
+        const [status, jobsResp] = await Promise.all([
+          api('/status'),
+          api('/jobs?limit=200' + (activeFilter !== 'all' ? '&status=' + activeFilter : '')),
+        ]);
+        const st = status.stats || {};
+        renderStats(st);
+        const qs = status.queue_state || 'unknown';
+        const pill = document.getElementById('queue-pill');
+        pill.textContent = qs;
+        pill.className = 'pill ' + (qs === 'running' ? 'running' : qs.includes('paused') ? 'paused' : 'failed');
+        document.getElementById('queue-meta').innerHTML = status.pause_reason
+          ? `<strong>Paused:</strong> ${esc(status.pause_reason)}` : '';
+        const p = status.pipeline || {};
+        document.getElementById('pipeline-meta').innerHTML = p.phase && p.phase !== 'idle'
+          ? `<strong>${esc(p.phase)}</strong>${p.current_job_name ? ' — ' + esc(p.current_job_name) : ''} (job #${p.current_job_id || '?'})`
+          : 'Idle — waiting for work';
+        renderJobs(jobsResp.jobs || []);
+        const active = (st.downloading||0) + (st.uploading||0) + (st.pending||0);
+        scheduleRefresh(active > 0 ? 1500 : 4000);
+      } catch (e) {
+        document.getElementById('jobs-list').innerHTML = `<div class="empty">Error: ${esc(e.message)}</div>`;
+        scheduleRefresh(5000);
+      }
+    }
+
+    document.getElementById('btn-resume').onclick = async () => { await post('/resume'); refresh(); };
+    document.getElementById('btn-pause').onclick = async () => { await post('/pause'); refresh(); };
+    document.getElementById('btn-retry').onclick = async () => { await post('/retry-failed'); refresh(); };
+    document.getElementById('btn-discover').onclick = async () => {
+      const btn = document.getElementById('btn-discover');
+      btn.disabled = true;
+      try { await post('/discover'); } finally { btn.disabled = false; refresh(); }
+    };
+
+    renderFilters();
+    refresh();
+  </script>
+</body>
+</html>

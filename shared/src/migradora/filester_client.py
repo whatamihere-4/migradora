@@ -71,12 +71,17 @@ class FilesterClient:
         data = self._request("GET", "/api/v1/folders")
         return data.get("data", [])
 
-    def create_folder(self, name: str, public: int = 1) -> str:
-        data = self._request(
-            "POST",
-            "/api/v1/folder",
-            json={"name": name[:100], "public": public},
-        )
+    def create_folder(
+        self,
+        name: str,
+        *,
+        parent_id: str | None = None,
+        public: int = 1,
+    ) -> str:
+        payload: dict[str, object] = {"name": name[:100], "public": public}
+        if parent_id:
+            payload["parent_id"] = parent_id
+        data = self._request("POST", "/api/v1/folder", json=payload)
         folder = data.get("data", {})
         folder_id = folder.get("identifier") or folder.get("id", "")
         if not folder_id:

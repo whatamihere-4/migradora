@@ -42,7 +42,7 @@ class Settings:
     # Filester
     filester_api_key: str = ""
     filester_api_base: str = "https://u1.filester.me"
-    filester_root_folder_name: str = "gofile-mirror"
+    filester_root_folder_name: str = ""
     filester_max_file_bytes: int = 10_200_547_328  # 9.5 GiB
 
     # Paths
@@ -96,7 +96,7 @@ class Settings:
             gofile_password=_env("GOFILE_PASSWORD"),
             filester_api_key=_env("FILESTER_API_KEY"),
             filester_api_base=_env("FILESTER_API_BASE", "https://u1.filester.me").rstrip("/"),
-            filester_root_folder_name=_env("FILESTER_ROOT_FOLDER_NAME", "gofile-mirror"),
+            filester_root_folder_name=_env("FILESTER_ROOT_FOLDER_NAME"),
             filester_max_file_bytes=_env_int("FILESTER_MAX_FILE_BYTES", 10_200_547_328),
             download_dir=_env("DOWNLOAD_DIR", "/data/downloads"),
             state_dir=state_dir,

@@ -18,14 +18,19 @@ cp .env.example .env
 | `GOFILE_FOLDER_URLS` | Comma-separated shared folder links from your **source account** (#1) |
 | `GOFILE_PASSWORD` | Only if folders are password-protected |
 | `FILESTER_API_KEY` | Filester API key |
+| `FILESTER_ROOT_FOLDER_NAME` | Optional wrapper folder on Filester (leave empty to mirror Gofile names directly, e.g. `VR/Studio1`) |
 
 ### 2. Share folders from source account
 
-On account #1 (owns the files), share each folder and paste the links into `GOFILE_FOLDER_URLS`:
+On account #1 (owns the files), share each folder and paste the links into `GOFILE_FOLDER_URLS`.
+
+For a tree like `VR/Studio1/...`, share the **VR** folder only — discovery walks subfolders recursively:
 
 ```bash
-GOFILE_FOLDER_URLS=https://gofile.io/d/abc123...,https://gofile.io/d/def456...
+GOFILE_FOLDER_URLS=https://gofile.io/d/YOUR_VR_FOLDER_ID
 ```
+
+Filester folders mirror the Gofile path (`VR` → `Studio1` → files). Large files upload as `.part001`, `.part002`, etc.
 
 ### 3. Start
 
@@ -49,6 +54,8 @@ docker compose exec orchestrator python -m migradora status
 docker compose exec orchestrator python -m migradora resume
 ```
 
+Open the dashboard at **http://your-vps:8080/** (apu-style dark UI — queue stats, job list, resume/pause/discover buttons).
+
 ## Architecture
 
 ```text
@@ -62,6 +69,7 @@ orchestrator (single container)
 
 | Endpoint | Description |
 |----------|-------------|
+| `GET /` | Web dashboard (queue monitor) |
 | `GET /health` | Pipeline health |
 | `GET /status` | Queue stats, Filester storage |
 | `GET /jobs?status=failed` | List jobs |

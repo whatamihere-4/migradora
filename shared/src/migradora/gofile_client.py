@@ -31,11 +31,16 @@ class GofileFile:
     name: str
     size_bytes: int
     path: str
-    root_label: str
 
     @property
     def page_url(self) -> str:
         return f"https://gofile.io/d/{self.folder_id}#file={self.file_id}"
+
+    @property
+    def parent_folder_path(self) -> str:
+        if "/" not in self.path:
+            return ""
+        return self.path.rsplit("/", 1)[0]
 
 
 def parse_folder_url(url: str) -> str:
@@ -172,23 +177,18 @@ class GofileClient:
         logger.info("Resolved %s -> %s", info.get("name", file_id), link[:80])
         return link
 
-    def iter_files(
-        self,
-        folder_url: str,
-        *,
-        root_label: str | None = None,
-    ) -> Iterator[GofileFile]:
+    def iter_files(self, folder_url: str) -> Iterator[GofileFile]:
         """Recursively yield files under a shared folder URL."""
         root_id = parse_folder_url(folder_url)
-        label = root_label or root_id[:8]
-        yield from self._walk_folder(root_id, path_prefix="", root_label=label)
+        data = self._get_folder_page(root_id, 1)
+        root_name = (data.get("name") or "Shared").strip()
+        yield from self._walk_folder(root_id, path_prefix=root_name)
 
     def _walk_folder(
         self,
         folder_id: str,
         *,
         path_prefix: str,
-        root_label: str,
     ) -> Iterator[GofileFile]:
         page = 1
         while True:
@@ -202,11 +202,7 @@ class GofileClient:
                 child_id = str(child.get("id", ""))
                 rel = f"{path_prefix}/{name}".lstrip("/")
                 if ctype == "folder":
-                    yield from self._walk_folder(
-                        child_id,
-                        path_prefix=rel,
-                        root_label=root_label,
-                    )
+                    yield from self._walk_folder(child_id, path_prefix=rel)
                 elif ctype == "file":
                     yield GofileFile(
                         file_id=child_id,
@@ -214,7 +210,6 @@ class GofileClient:
                         name=name,
                         size_bytes=int(child.get("size") or 0),
                         path=rel,
-                        root_label=root_label,
                     )
             if len(children) < _PAGE_SIZE:
                 break

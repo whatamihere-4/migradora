@@ -4,23 +4,12 @@ from __future__ import annotations
 
 import logging
 import time
-from urllib.parse import urlparse
 
 from migradora.config import Settings
 from migradora.gofile_client import GofileClient
 from migradora.queue.manager import QueueManager
 
 logger = logging.getLogger("migradora.discovery")
-
-
-def _root_label(folder_url: str) -> str:
-    path = urlparse(folder_url).path.rstrip("/")
-    if path.startswith("/d/"):
-        tail = path.split("/d/", 1)[1]
-        if "/" in tail:
-            return tail.split("/")[-1]
-        return tail[:12]
-    return folder_url.rstrip("/").split("/")[-1][:12] or "gofile"
 
 
 def discover_and_enqueue(settings: Settings, force: bool = False) -> dict[str, int]:
@@ -37,18 +26,16 @@ def discover_and_enqueue(settings: Settings, force: bool = False) -> dict[str, i
         password=settings.gofile_password,
     ) as gofile:
         for folder_url in settings.gofile_folder_urls:
-            label = _root_label(folder_url)
             logger.info("Discovering folder: %s", folder_url)
-            for gf in gofile.iter_files(folder_url, root_label=label):
+            for gf in gofile.iter_files(folder_url):
                 stats["discovered"] += 1
-                parent = gf.path.rsplit("/", 1)[0] if "/" in gf.path else label
                 job_id = queue.enqueue_file(
                     gofile_content_id=gf.file_id,
                     gofile_path=gf.path,
                     filename=gf.name,
                     size_bytes=gf.size_bytes,
                     gofile_url=gf.page_url,
-                    parent_folder_path=parent,
+                    parent_folder_path=gf.parent_folder_path,
                     force=force,
                 )
                 if job_id:
