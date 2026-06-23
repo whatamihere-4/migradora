@@ -203,20 +203,25 @@
         `${pct}% complete · ${fmtBytes(stats.uploaded_bytes)} / ${fmtBytes(stats.total_bytes)} uploaded`;
     }
 
-    function renderJobs(jobs, pipeline) {
+    function renderJobs(jobs, pipeline, currentJob) {
       const list = document.getElementById('jobs-list');
-      const filtered = activeFilter === 'all' ? jobs : jobs.filter(j => j.status === activeFilter);
+      let filtered = activeFilter === 'all' ? jobs : jobs.filter(j => j.status === activeFilter);
+      if (currentJob && activeFilter !== 'all' && currentJob.status === activeFilter
+          && !filtered.some(j => j.id === currentJob.id)) {
+        filtered = [currentJob, ...filtered];
+      }
       const sorted = [...filtered].sort((a, b) => a.id - b.id);
       if (!sorted.length) {
         list.innerHTML = '<div class="empty">No jobs in this filter</div>';
         return;
       }
       const currentId = pipeline && pipeline.current_job_id;
+      const phase = pipeline && pipeline.phase;
       const progBytes = pipeline && pipeline.progress_bytes || 0;
       const progTotal = pipeline && pipeline.progress_total || 0;
       list.innerHTML = sorted.map(j => {
         const isCurrent = currentId === j.id;
-        const isActive = isCurrent && (j.status === 'downloading' || j.status === 'uploading');
+        const isActive = isCurrent && (phase === 'downloading' || phase === 'uploading');
         const parts = (j.filester_slug || []).length;
         const partHint = parts > 1 ? ` (${parts} parts)` : parts === 1 ? '' : '';
         const links = (j.filester_slug || []).map(s =>
@@ -250,7 +255,7 @@
       try {
         const [status, jobsResp] = await Promise.all([
           api('/status'),
-          api('/jobs?limit=500' + (activeFilter !== 'all' ? '&status=' + activeFilter : '')),
+          api('/jobs?limit=500'),
         ]);
         const st = status.stats || {};
         renderStats(st);
@@ -268,7 +273,7 @@
           ? `<br>${Math.round((p.progress_bytes / p.progress_total) * 100)}% · ${fmtBytes(p.progress_bytes)} / ${fmtBytes(p.progress_total)}`
           : '';
         document.getElementById('pipeline-meta').innerHTML = phaseLabel + progLabel;
-        renderJobs(jobsResp.jobs || [], p);
+        renderJobs(jobsResp.jobs || [], p, status.current_job);
         const active = (st.downloading||0) + (st.uploading||0);
         scheduleRefresh(active > 0 ? 1500 : 4000);
       } catch (e) {

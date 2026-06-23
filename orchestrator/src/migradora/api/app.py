@@ -60,15 +60,39 @@ def create_app(settings: Settings, orchestrator: Orchestrator) -> FastAPI:
             "queue_state": queue.get_queue_state()[0].value,
         }
 
+    def _job_payload(record) -> dict[str, Any]:
+        return {
+            "id": record.id,
+            "filename": record.filename,
+            "gofile_path": record.gofile_path,
+            "parent_folder_path": record.parent_folder_path,
+            "gofile_url": record.gofile_url,
+            "size_bytes": record.size_bytes,
+            "status": record.status.value,
+            "attempts": record.attempts,
+            "last_error": record.last_error,
+            "filester_slug": record.filester_slug,
+        }
+
     @app.get("/status")
     def status() -> dict[str, Any]:
         stats = queue.get_stats()
         state, pause_reason = queue.get_queue_state()
         filester_stats = orchestrator.filester_monitor.fetch_storage_stats()
+        pipeline = orchestrator.pipeline.status
+        current_job = None
+        job_id = pipeline.get("current_job_id")
+        phase = pipeline.get("phase")
+        if job_id and phase in ("downloading", "uploading"):
+            record = queue.get_file(job_id)
+            if record:
+                current_job = _job_payload(record)
+                current_job["status"] = phase
         return {
             "queue_state": state.value,
             "pause_reason": pause_reason,
-            "pipeline": orchestrator.pipeline.status,
+            "pipeline": pipeline,
+            "current_job": current_job,
             "stats": {
                 "total": stats.total,
                 "pending": stats.pending,
@@ -90,23 +114,7 @@ def create_app(settings: Settings, orchestrator: Orchestrator) -> FastAPI:
         limit: int = Query(100, ge=1, le=500),
     ) -> dict[str, Any]:
         records = queue.list_files(status=status, limit=limit)
-        return {
-            "jobs": [
-                {
-                    "id": r.id,
-                    "filename": r.filename,
-                    "gofile_path": r.gofile_path,
-                    "parent_folder_path": r.parent_folder_path,
-                    "gofile_url": r.gofile_url,
-                    "size_bytes": r.size_bytes,
-                    "status": r.status.value,
-                    "attempts": r.attempts,
-                    "last_error": r.last_error,
-                    "filester_slug": r.filester_slug,
-                }
-                for r in records
-            ]
-        }
+        return {"jobs": [_job_payload(r) for r in records]}
 
     @app.post("/resume")
     def resume() -> dict[str, str]:
@@ -116,7 +124,12 @@ def create_app(settings: Settings, orchestrator: Orchestrator) -> FastAPI:
     @app.post("/retry-failed")
     def retry_failed() -> dict[str, Any]:
         count = queue.reset_failed_jobs()
-        active = queue.reset_active_jobs()
+        exclude = (
+            [orchestrator.pipeline._current_job_id]
+            if orchestrator.pipeline._current_job_id
+            else []
+        )
+        active = queue.reset_active_jobs(exclude_ids=exclude)
         orchestrator.resume()
         return {"status": "ok", "reset": count, "reset_active": active}
 

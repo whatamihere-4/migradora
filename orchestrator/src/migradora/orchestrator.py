@@ -34,7 +34,14 @@ class Orchestrator:
         interval = max(60, int(self.settings.worker_poll_interval_sec * 12))
         while not self._stop.is_set():
             write_heartbeat(self.settings.state_dir)
-            self.queue.reset_stale_jobs(self.settings.stale_job_timeout_sec)
+            exclude = (
+                [self.pipeline._current_job_id]
+                if self.pipeline._current_job_id
+                else []
+            )
+            self.queue.reset_stale_jobs(
+                self.settings.stale_job_timeout_sec, exclude_ids=exclude
+            )
 
             state, _ = self.queue.get_queue_state()
             if state == QueueState.PAUSED_DISK:

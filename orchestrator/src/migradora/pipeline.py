@@ -43,6 +43,7 @@ class PipelineCoordinator:
         self._folder_cache: dict[str, str] = {}
         self._progress_bytes: int = 0
         self._progress_total: int = 0
+        self._last_touch_at: float = 0.0
 
     @property
     def status(self) -> dict:
@@ -61,7 +62,10 @@ class PipelineCoordinator:
         logger.info("Pipeline started")
         while not self._stop.is_set():
             write_heartbeat(self.settings.state_dir)
-            self.queue.reset_stale_jobs(self.settings.stale_job_timeout_sec)
+            exclude = [self._current_job_id] if self._current_job_id else []
+            self.queue.reset_stale_jobs(
+                self.settings.stale_job_timeout_sec, exclude_ids=exclude
+            )
 
             state, _ = self.queue.get_queue_state()
             if state != QueueState.RUNNING:
@@ -110,11 +114,17 @@ class PipelineCoordinator:
         self._current_phase = "downloading"
         self._progress_bytes = 0
         self._progress_total = job.size_bytes or 0
+        self._last_touch_at = 0.0
+        self.queue.update_file(job.id, status=FileStatus.DOWNLOADING)
 
         def on_download_progress(done: int, total: int | None) -> None:
             self._progress_bytes = done
             if total:
                 self._progress_total = total
+            now = time.time()
+            if now - self._last_touch_at >= 30:
+                self._last_touch_at = now
+                self.queue.touch_file(job.id)
 
         with GofileClient(
             token=self.settings.gofile_token,

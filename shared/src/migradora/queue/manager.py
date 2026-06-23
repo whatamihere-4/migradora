@@ -81,6 +81,20 @@ class QueueManager:
     def claim_pending_job(self) -> FileRecord | None:
         return self.claim_download_job()
 
+    def get_file(self, file_id: int) -> FileRecord | None:
+        with self.connection() as conn:
+            row = conn.execute("SELECT * FROM files WHERE id=?", (file_id,)).fetchone()
+            if not row:
+                return None
+            return FileRecord.from_row(row)
+
+    def touch_file(self, file_id: int) -> None:
+        with self.connection() as conn:
+            conn.execute(
+                "UPDATE files SET updated_at=? WHERE id=?",
+                (utc_now(), file_id),
+            )
+
     def enqueue_part(
         self,
         parent_file_id: int,
@@ -293,44 +307,83 @@ class QueueManager:
         with self.connection() as conn:
             if status:
                 rows = conn.execute(
-                    "SELECT * FROM files WHERE status=? ORDER BY id ASC LIMIT ?",
+                    """SELECT * FROM files
+                       WHERE is_part=0 AND status=? ORDER BY id ASC LIMIT ?""",
                     (status, limit),
                 ).fetchall()
             else:
                 rows = conn.execute(
-                    "SELECT * FROM files ORDER BY id ASC LIMIT ?", (limit,)
+                    """SELECT * FROM files
+                       WHERE is_part=0 ORDER BY id ASC LIMIT ?""",
+                    (limit,),
                 ).fetchall()
             return [FileRecord.from_row(r) for r in rows]
 
-    def reset_active_jobs(self) -> int:
+    def reset_active_jobs(self, exclude_ids: list[int] | None = None) -> int:
         """Return stuck downloading/uploading jobs to pending (e.g. after crash)."""
+        exclude_ids = exclude_ids or []
         with self.connection() as conn:
-            cur = conn.execute(
-                """UPDATE files SET status=?, updated_at=?
-                   WHERE is_part=0 AND status IN (?, ?)""",
-                (
-                    FileStatus.PENDING.value,
-                    utc_now(),
-                    FileStatus.DOWNLOADING.value,
-                    FileStatus.UPLOADING.value,
-                ),
-            )
+            if exclude_ids:
+                placeholders = ",".join("?" * len(exclude_ids))
+                cur = conn.execute(
+                    f"""UPDATE files SET status=?, updated_at=?
+                        WHERE is_part=0 AND status IN (?, ?)
+                        AND id NOT IN ({placeholders})""",
+                    (
+                        FileStatus.PENDING.value,
+                        utc_now(),
+                        FileStatus.DOWNLOADING.value,
+                        FileStatus.UPLOADING.value,
+                        *exclude_ids,
+                    ),
+                )
+            else:
+                cur = conn.execute(
+                    """UPDATE files SET status=?, updated_at=?
+                       WHERE is_part=0 AND status IN (?, ?)""",
+                    (
+                        FileStatus.PENDING.value,
+                        utc_now(),
+                        FileStatus.DOWNLOADING.value,
+                        FileStatus.UPLOADING.value,
+                    ),
+                )
             return cur.rowcount
 
-    def reset_stale_jobs(self, timeout_sec: int) -> int:
+    def reset_stale_jobs(
+        self, timeout_sec: int, exclude_ids: list[int] | None = None
+    ) -> int:
+        exclude_ids = exclude_ids or []
         with self.connection() as conn:
-            cur = conn.execute(
-                """UPDATE files SET status=?, updated_at=?
-                   WHERE status IN (?, ?)
-                   AND datetime(updated_at) < datetime('now', ? || ' seconds')""",
-                (
-                    FileStatus.PENDING.value,
-                    utc_now(),
-                    FileStatus.DOWNLOADING.value,
-                    FileStatus.UPLOADING.value,
-                    f"-{timeout_sec}",
-                ),
-            )
+            if exclude_ids:
+                placeholders = ",".join("?" * len(exclude_ids))
+                cur = conn.execute(
+                    f"""UPDATE files SET status=?, updated_at=?
+                        WHERE is_part=0 AND status IN (?, ?)
+                        AND datetime(updated_at) < datetime('now', ? || ' seconds')
+                        AND id NOT IN ({placeholders})""",
+                    (
+                        FileStatus.PENDING.value,
+                        utc_now(),
+                        FileStatus.DOWNLOADING.value,
+                        FileStatus.UPLOADING.value,
+                        f"-{timeout_sec}",
+                        *exclude_ids,
+                    ),
+                )
+            else:
+                cur = conn.execute(
+                    """UPDATE files SET status=?, updated_at=?
+                       WHERE is_part=0 AND status IN (?, ?)
+                       AND datetime(updated_at) < datetime('now', ? || ' seconds')""",
+                    (
+                        FileStatus.PENDING.value,
+                        utc_now(),
+                        FileStatus.DOWNLOADING.value,
+                        FileStatus.UPLOADING.value,
+                        f"-{timeout_sec}",
+                    ),
+                )
             return cur.rowcount
 
     def set_queue_state(self, state: QueueState, reason: str = "") -> None:
