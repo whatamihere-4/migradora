@@ -85,6 +85,11 @@ orchestrator (single container)
 | `./scripts/test-gofile-resolve.sh [url]` | Test API token (folder list or file resolve) |
 | `./scripts/reset-failed-jobs.sh` | Reset failed/stuck jobs |
 | `./scripts/health-check.sh` | Quick VPS diagnostics |
+| `./scripts/check-webui-port.sh` | Verify WEBUI_PORT binding |
+
+## Optional: Caddy + Tailscale HTTPS
+
+See [docs/CADDY.md](docs/CADDY.md) if you proxy through your existing Caddy stack on `caddy_net`.
 
 ## Large files
 

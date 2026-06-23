@@ -25,6 +25,13 @@ def _env_bool(key: str, default: bool = False) -> bool:
     return val in ("1", "true", "yes", "on")
 
 
+def _env_list(key: str) -> list[str]:
+    raw = _env(key)
+    if not raw:
+        return []
+    return [item.strip() for item in raw.split(",") if item.strip()]
+
+
 def _webui_port() -> int:
     """Host + container bind port for the web dashboard (WEBUI_PORT or legacy DASHBOARD_PORT)."""
     if _env("WEBUI_PORT"):
@@ -32,12 +39,6 @@ def _webui_port() -> int:
     if _env("DASHBOARD_PORT"):
         return int(_env("DASHBOARD_PORT"))
     return 8080
-
-
-    raw = _env(key)
-    if not raw:
-        return []
-    return [item.strip() for item in raw.split(",") if item.strip()]
 
 
 @dataclass
