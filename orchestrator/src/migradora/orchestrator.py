@@ -101,6 +101,6 @@ def run_orchestrator(settings: Settings | None = None) -> None:
     uvicorn.run(
         app,
         host=settings.dashboard_host,
-        port=settings.dashboard_bind_port,
+        port=settings.webui_port,
         log_level=settings.log_level.lower(),
     )

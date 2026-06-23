@@ -17,6 +17,7 @@ cp .env.example .env
 | `GOFILE_TOKEN` | API token from [gofile.io/myProfile](https://gofile.io/myProfile) on account #2 (subscription **or** PAYG) |
 | `GOFILE_FOLDER_URLS` | Comma-separated shared folder links from your **source account** (#1) |
 | `GOFILE_PASSWORD` | Only if folders are password-protected |
+| `WEBUI_PORT` | Web dashboard port (host + container), default `8080` |
 | `FILESTER_API_KEY` | Filester API key |
 | `FILESTER_ROOT_FOLDER_NAME` | Optional wrapper folder on Filester (leave empty to mirror Gofile names directly, e.g. `VR/Studio1`) |
 
@@ -54,7 +55,7 @@ docker compose exec orchestrator python -m migradora status
 docker compose exec orchestrator python -m migradora resume
 ```
 
-Open the dashboard at **http://your-vps:8080/** (apu-style dark UI — queue stats, job list, resume/pause/discover buttons).
+Open the dashboard at **http://your-vps:WEBUI_PORT/** (default port 8080).
 
 ## Architecture
 

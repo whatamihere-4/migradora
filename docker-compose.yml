@@ -6,17 +6,16 @@ services:
     container_name: migradora-orchestrator
     env_file: .env
     environment:
-      DASHBOARD_BIND_PORT: "8080"
       DOWNLOAD_DIR: /data/downloads
     ports:
-      - "${DASHBOARD_PORT:-8080}:8080"
+      - "${WEBUI_PORT:-${DASHBOARD_PORT:-8080}}:${WEBUI_PORT:-${DASHBOARD_PORT:-8080}}"
     volumes:
       - ./data/downloads:/data/downloads
       - ./data/state:/data/state
       - ./data/logs:/data/logs
     restart: unless-stopped
     healthcheck:
-      test: ["CMD", "curl", "-f", "http://localhost:8080/health"]
+      test: ["CMD-SHELL", "curl -f http://localhost:${WEBUI_PORT:-${DASHBOARD_PORT:-8080}}/health || exit 1"]
       interval: 30s
       timeout: 10s
       retries: 3

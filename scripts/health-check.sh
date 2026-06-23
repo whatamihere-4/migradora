@@ -8,11 +8,11 @@ docker compose ps -a
 
 echo
 echo "=== Orchestrator dashboard ==="
-PORT="${DASHBOARD_PORT:-8080}"
+PORT="${WEBUI_PORT:-${DASHBOARD_PORT:-8080}}"
 if [ -f .env ]; then
   # shellcheck disable=SC1091
   . ./.env 2>/dev/null || true
-  PORT="${DASHBOARD_PORT:-8080}"
+  PORT="${WEBUI_PORT:-${DASHBOARD_PORT:-8080}}"
 fi
 curl -sf "http://localhost:${PORT}/health" | head -c 500 && echo || echo " FAIL (port ${PORT})"
 

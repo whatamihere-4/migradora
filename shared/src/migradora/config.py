@@ -25,7 +25,15 @@ def _env_bool(key: str, default: bool = False) -> bool:
     return val in ("1", "true", "yes", "on")
 
 
-def _env_list(key: str) -> list[str]:
+def _webui_port() -> int:
+    """Host + container bind port for the web dashboard (WEBUI_PORT or legacy DASHBOARD_PORT)."""
+    if _env("WEBUI_PORT"):
+        return int(_env("WEBUI_PORT"))
+    if _env("DASHBOARD_PORT"):
+        return int(_env("DASHBOARD_PORT"))
+    return 8080
+
+
     raw = _env(key)
     if not raw:
         return []
@@ -67,10 +75,9 @@ class Settings:
     # Filester account storage guard (0 = disabled; Filester limit is per-file not per-account)
     filester_storage_pause_pct: float = 0.0
 
-    # Dashboard
+    # Web dashboard
+    webui_port: int = 8080
     dashboard_host: str = "0.0.0.0"
-    dashboard_port: int = 8080
-    dashboard_bind_port: int = 8080
     log_level: str = "INFO"
 
     # Worker
@@ -112,12 +119,8 @@ class Settings:
             upload_retry_delay_sec=_env_int("UPLOAD_RETRY_DELAY_SEC", 30),
             discovery_delay_sec=float(_env("DISCOVERY_DELAY_SEC", "2")),
             filester_storage_pause_pct=float(_env("FILESTER_STORAGE_PAUSE_PCT", "0")),
+            webui_port=_webui_port(),
             dashboard_host=_env("DASHBOARD_HOST", "0.0.0.0"),
-            dashboard_port=_env_int("DASHBOARD_PORT", 8080),
-            dashboard_bind_port=_env_int(
-                "DASHBOARD_BIND_PORT",
-                _env_int("DASHBOARD_PORT", 8080),
-            ),
             log_level=_env("LOG_LEVEL", "INFO"),
             worker_poll_interval_sec=float(_env("WORKER_POLL_INTERVAL_SEC", "5")),
             heartbeat_interval_sec=_env_int("HEARTBEAT_INTERVAL_SEC", 30),
