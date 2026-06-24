@@ -13,7 +13,7 @@ from migradora.filester_client import FilesterClient
 from migradora.gofile_client import GofileClient
 from migradora.models import FileStatus, QueueState
 from migradora.queue.manager import QueueManager
-from migradora.splitter import split_file
+from migradora.splitter import iter_upload_parts, required_disk_bytes
 from migradora.utils import free_disk_gb
 
 from migradora.filester_folders import CachedFolder, ensure_filester_folder_path
@@ -111,6 +111,30 @@ class PipelineCoordinator:
         job_dir = Path(self.settings.download_dir) / f"job-{job.id}"
         job_dir.mkdir(parents=True, exist_ok=True)
 
+        if job.size_bytes:
+            need_gb = (
+                required_disk_bytes(job.size_bytes, self.settings.filester_max_file_bytes)
+                / (1024**3)
+                + self.settings.min_free_disk_gb
+            )
+            free_gb = free_disk_gb(self.settings.download_dir)
+            if free_gb < need_gb:
+                self.queue.update_file(job.id, status=FileStatus.PENDING)
+                self.queue.set_queue_state(
+                    QueueState.PAUSED_DISK,
+                    f"Need ~{need_gb:.0f} GB free for {job.filename} ({free_gb:.1f} GB available)",
+                )
+                self._current_phase = "idle"
+                self._current_job_id = None
+                self._current_job_name = ""
+                logger.warning(
+                    "Paused for disk: job %d needs ~%.0f GB, %.1f GB free",
+                    job.id,
+                    need_gb,
+                    free_gb,
+                )
+                return
+
         self._current_phase = "downloading"
         self._progress_bytes = 0
         self._progress_total = job.size_bytes or 0
@@ -159,12 +183,6 @@ class PipelineCoordinator:
         self._progress_bytes = 0
         self._progress_total = local_path.stat().st_size
         self.queue.update_file(job.id, status=FileStatus.UPLOADING)
-        parts = split_file(
-            local_path,
-            job_dir,
-            self.settings.filester_max_file_bytes,
-            base_name=local_path.stem,
-        )
 
         slugs: list[str] = []
         with FilesterClient(
@@ -176,7 +194,12 @@ class PipelineCoordinator:
             folder_id = ensure_filester_folder_path(
                 filester, self.queue, self.settings, job.parent_folder_path, self._folder_cache
             )
-            for part in parts:
+            for part in iter_upload_parts(
+                local_path,
+                job_dir,
+                self.settings.filester_max_file_bytes,
+                base_name=local_path.stem,
+            ):
                 part_path = Path(part["path"])
                 self._progress_bytes = 0
                 self._progress_total = part["size_bytes"]
