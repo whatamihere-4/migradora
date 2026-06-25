@@ -73,12 +73,15 @@ def main() -> int:
     sub.add_parser("resume", help="Resume paused queue")
     sub.add_parser("retry-failed", help="Reset failed jobs to pending and resume queue")
     sub.add_parser("run", help="Run orchestrator with dashboard")
-    probe = sub.add_parser("filester-probe", help="Probe Filester folder API (list/create tests)")
-    probe.add_argument("--name", default="migradora-probe-test")
-    probe.add_argument("--parent-db-id", type=int, default=None)
-    probe.add_argument("--parent-identifier", default=None)
-    probe.add_argument("--search", default=None)
-    probe.add_argument("--dry-run", action="store_true")
+    probe = sub.add_parser(
+        "filester-probe",
+        help="Probe Filester folder API (pass --help after filester-probe for options)",
+    )
+    probe.add_argument(
+        "probe_args",
+        nargs=argparse.REMAINDER,
+        help="Arguments forwarded to filester-probe (e.g. --probe-move --folder-identifier ID)",
+    )
 
     parser.add_argument("--force", action="store_true", help="Re-enqueue uploaded files (discover)")
     args = parser.parse_args()
@@ -88,17 +91,9 @@ def main() -> int:
     setup_logging("orchestrator", settings.log_dir, settings.log_level)
 
     if args.command == "filester-probe":
-        probe_argv = []
-        if args.name != "migradora-probe-test":
-            probe_argv.extend(["--name", args.name])
-        if args.parent_db_id is not None:
-            probe_argv.extend(["--parent-db-id", str(args.parent_db_id)])
-        if args.parent_identifier:
-            probe_argv.extend(["--parent-identifier", args.parent_identifier])
-        if args.search:
-            probe_argv.extend(["--search", args.search])
-        if args.dry_run:
-            probe_argv.append("--dry-run")
+        probe_argv = [a for a in args.probe_args if a != "--"]
+        if not probe_argv or probe_argv == ["--help"] or "-h" in probe_argv:
+            return run_probe(["--help"])
         return run_probe(probe_argv)
 
     commands = {

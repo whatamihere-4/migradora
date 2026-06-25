@@ -113,10 +113,7 @@ def run_orchestrator(settings: Settings | None = None) -> None:
     orch = Orchestrator(settings)
     cleared = orch.queue.clear_flat_folder_mappings()
     if cleared:
-        logger.warning("Cleared %d flat Filester folder mapping(s) — will recreate nested folders", cleared)
-    remapped = orch.queue.clear_all_folder_mappings()
-    if remapped:
-        logger.info("Cleared %d cached Filester folder mapping(s)", remapped)
+        logger.warning("Cleared %d flat Filester folder mapping(s)", cleared)
     reset = orch.queue.reset_active_jobs()
     if reset:
         logger.warning("Reset %d orphaned downloading/uploading job(s) to pending", reset)

@@ -56,25 +56,36 @@ class CreateFolderConflictTests(unittest.TestCase):
         self.client.close()
 
     def test_create_returns_existing_on_409(self) -> None:
-        existing = FilesterFolder(identifier="czech-id", name="CzechVR", db_id=42, parent_db_id=10)
-        index = FolderIndex([
-            FilesterFolder(identifier="vr", name="VR", db_id=10, parent_db_id=None),
-            existing,
-        ])
+        existing = FilesterFolder(identifier="czech-id", name="CzechVR")
 
         conflict = httpx.Response(
             409,
             request=httpx.Request("POST", "https://u1.filester.me/api/v1/folder"),
-            json={"success": False, "message": "Folder already exists"},
+            json={"success": False, "message": "You already have a folder with this name"},
         )
 
-        with patch.object(self.client, "folder_index", return_value=index):
+        with patch.object(self.client, "find_folder", return_value=existing):
             with patch.object(self.client, "_post_folder", side_effect=httpx.HTTPStatusError(
                 "conflict", request=conflict.request, response=conflict
             )):
-                with patch.object(self.client, "find_folder", return_value=existing):
-                    folder = self.client.create_folder("CzechVR", parent_db_id=10)
+                folder = self.client.create_folder("CzechVR")
         self.assertEqual(folder.identifier, "czech-id")
+
+    def test_parse_create_response_nested_folder(self) -> None:
+        folder = FilesterClient._parse_folder_from_create({
+            "success": True,
+            "data": {
+                "folder": {
+                    "id": "6a648cb787ef0f18",
+                    "name": "migradora-probe-test",
+                },
+                "identifier": "6a648cb787ef0f18",
+            },
+        })
+        self.assertIsNotNone(folder)
+        assert folder is not None
+        self.assertEqual(folder.identifier, "6a648cb787ef0f18")
+        self.assertEqual(folder.name, "migradora-probe-test")
 
     def test_parse_folder_keeps_hex_identifier_separate_from_db_id(self) -> None:
         folder = FilesterClient._parse_folder({

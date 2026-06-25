@@ -6,7 +6,7 @@ import logging
 from dataclasses import dataclass
 
 from migradora.config import Settings
-from migradora.filester_client import FilesterClient, FolderIndex
+from migradora.filester_client import FilesterClient
 from migradora.queue.manager import QueueManager
 
 logger = logging.getLogger("migradora.filester_folders")
@@ -15,7 +15,6 @@ logger = logging.getLogger("migradora.filester_folders")
 @dataclass
 class CachedFolder:
     identifier: str
-    db_id: int | None = None
 
 
 def _full_path(settings: Settings, gofile_folder_path: str) -> str:
@@ -34,25 +33,14 @@ def _is_flat_fallback_name(folder_name: str) -> bool:
     return " / " in folder_name
 
 
-def _resolve_cached(
-    identifier: str,
-    index: FolderIndex,
-) -> CachedFolder:
-    folder = index.by_identifier(identifier)
-    if folder:
-        return CachedFolder(identifier=folder.identifier, db_id=folder.db_id)
-    return CachedFolder(identifier=identifier)
-
-
-def _seed_configured_root(
+def _seed_root_folder(
     settings: Settings,
     cache: dict[str, CachedFolder],
 ) -> None:
     root_name = settings.filester_root_folder_name.strip()
     root_id = settings.filester_root_folder_id.strip()
     if root_name and root_id and root_name not in cache:
-        cache[root_name] = CachedFolder(identifier=root_id, db_id=None)
-        logger.info("Using configured Filester root folder %r -> %s", root_name, root_id)
+        cache[root_name] = CachedFolder(identifier=root_id)
 
 
 def ensure_filester_folder_path(
@@ -62,20 +50,20 @@ def ensure_filester_folder_path(
     gofile_folder_path: str,
     cache: dict[str, CachedFolder],
 ) -> str:
-    """Mirror a Gofile folder path like ``VR/Studio1`` as nested Filester folders."""
-    _seed_configured_root(settings, cache)
+    """
+    Mirror a Gofile path like ``VR/CzechVR`` as nested Filester folders.
+
+    Requires ``FILESTER_ROOT_FOLDER_NAME=VR`` (and optionally ``FILESTER_ROOT_FOLDER_ID``).
+    Studio folders are created *inside* VR via ``parent_id`` on ``/api/v1/folder``.
+    """
+    _seed_root_folder(settings, cache)
     path = _full_path(settings, gofile_folder_path)
     if not path:
-        folder_id = _ensure_root(client, queue, settings, cache)
-        if not folder_id:
-            raise RuntimeError("Failed to resolve Filester root folder")
-        return folder_id
+        return _ensure_root_folder(client, queue, settings, cache)
 
     if path in cache:
         return cache[path].identifier
 
-    index = client.folder_index()
-    parent_db_id: int | None = None
     parent_identifier: str | None = None
     last_identifier: str | None = None
     accumulated = ""
@@ -84,76 +72,113 @@ def ensure_filester_folder_path(
         accumulated = f"{accumulated}/{segment}".lstrip("/")
 
         if accumulated in cache:
-            cached = cache[accumulated]
-            parent_db_id = cached.db_id
-            parent_identifier = cached.identifier
-            last_identifier = cached.identifier
+            parent_identifier = cache[accumulated].identifier
+            last_identifier = parent_identifier
             continue
 
         mapping = queue.get_folder_mapping_record(accumulated)
         if mapping and not _is_flat_fallback_name(mapping[1]):
-            cached = _resolve_cached(mapping[0], index)
+            cached = CachedFolder(identifier=mapping[0])
             cache[accumulated] = cached
-            parent_db_id = cached.db_id
             parent_identifier = cached.identifier
             last_identifier = cached.identifier
             continue
 
-        existing = index.find_child(
+        is_root_segment = (
+            segment == settings.filester_root_folder_name.strip()
+            and parent_identifier is None
+        )
+        if is_root_segment and settings.filester_root_folder_id.strip():
+            folder_id = settings.filester_root_folder_id.strip()
+            cached = CachedFolder(identifier=folder_id)
+            cache[accumulated] = cached
+            queue.save_folder_mapping(accumulated, folder_id, segment)
+            parent_identifier = folder_id
+            last_identifier = folder_id
+            continue
+
+        existing = client.find_folder(
             segment,
-            parent_db_id=parent_db_id,
             parent_identifier=parent_identifier,
         )
         if existing:
-            cached = CachedFolder(identifier=existing.identifier, db_id=existing.db_id)
+            cached = CachedFolder(identifier=existing.identifier)
             cache[accumulated] = cached
             queue.save_folder_mapping(accumulated, existing.identifier, segment)
-            parent_db_id = cached.db_id
-            parent_identifier = cached.identifier
-            last_identifier = cached.identifier
+            logger.info(
+                "Found Filester folder %r under parent %s -> %s",
+                segment,
+                parent_identifier or "root",
+                existing.identifier,
+            )
+            parent_identifier = existing.identifier
+            last_identifier = existing.identifier
             continue
 
-        created = client.create_folder(
-            segment,
-            parent_db_id=parent_db_id,
-            parent_identifier=parent_identifier,
-        )
-        cached = CachedFolder(identifier=created.identifier, db_id=created.db_id)
+        try:
+            created = client.create_folder(
+                segment,
+                parent_identifier=parent_identifier,
+            )
+        except RuntimeError as exc:
+            if parent_identifier and "409" in str(exc):
+                root_dup = client.find_folder(segment)
+                if root_dup:
+                    raise RuntimeError(
+                        f"Folder {segment!r} already exists at the Filester account root "
+                        f"({root_dup.identifier}). Delete or move that top-level folder on "
+                        f"Filester so migradora can create {segment!r} inside "
+                        f"{settings.filester_root_folder_name or 'VR'}/."
+                    ) from exc
+            raise
+
+        cached = CachedFolder(identifier=created.identifier)
         cache[accumulated] = cached
         queue.save_folder_mapping(accumulated, created.identifier, segment)
-        parent_db_id = created.db_id
         parent_identifier = created.identifier
         last_identifier = created.identifier
+        logger.info(
+            "Ensured Filester folder %r -> %s (gofile path %r)",
+            segment,
+            created.identifier,
+            accumulated,
+        )
 
     if not last_identifier:
         raise RuntimeError(f"Failed to resolve Filester folder path: {path}")
-    logger.info("Resolved Filester upload folder for %r -> %s", path, last_identifier)
     return last_identifier
 
 
-def _ensure_root(
+def _ensure_root_folder(
     client: FilesterClient,
     queue: QueueManager,
     settings: Settings,
     cache: dict[str, CachedFolder],
-) -> str | None:
+) -> str:
     key = "__root__"
     if key in cache:
         return cache[key].identifier
+
     mapping = queue.get_folder_mapping_record(key)
     if mapping and not _is_flat_fallback_name(mapping[1]):
-        cached = _resolve_cached(mapping[0], client.folder_index())
+        cached = CachedFolder(identifier=mapping[0])
         cache[key] = cached
         return cached.identifier
-    name = settings.filester_root_folder_name or "gofile-mirror"
+
     root_id = settings.filester_root_folder_id.strip()
+    name = settings.filester_root_folder_name.strip() or "gofile-mirror"
     if root_id:
-        cached = CachedFolder(identifier=root_id, db_id=None)
-        cache[key] = cached
+        cache[key] = CachedFolder(identifier=root_id)
         queue.save_folder_mapping(key, root_id, name)
         return root_id
+
+    existing = client.find_folder(name)
+    if existing:
+        cache[key] = CachedFolder(identifier=existing.identifier)
+        queue.save_folder_mapping(key, existing.identifier, name)
+        return existing.identifier
+
     created = client.create_folder(name)
-    cached = CachedFolder(identifier=created.identifier, db_id=created.db_id)
-    cache[key] = cached
+    cache[key] = CachedFolder(identifier=created.identifier)
     queue.save_folder_mapping(key, created.identifier, name)
     return created.identifier

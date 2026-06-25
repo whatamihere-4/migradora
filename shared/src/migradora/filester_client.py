@@ -184,7 +184,7 @@ class FilesterClient:
 
         if not identifier:
             value = raw.get("id")
-            if isinstance(value, str) and value and not value.isdigit():
+            if isinstance(value, str) and value:
                 identifier = value
 
         if not identifier:
@@ -218,47 +218,7 @@ class FilesterClient:
                 folders.append(folder)
                 seen.add(folder.identifier)
 
-        try:
-            data = self._request("GET", "/api/user/folders")
-        except httpx.HTTPError as exc:
-            logger.warning("Filester /api/user/folders unavailable: %s", exc)
-            return folders
-
-        for raw in data.get("folders") or []:
-            folder = self._parse_folder(raw)
-            if folder and folder.identifier not in seen:
-                folders.append(folder)
-                seen.add(folder.identifier)
-
-        self._walk_hierarchical(data.get("hierarchical") or [], None, folders, seen)
         return folders
-
-    def _walk_hierarchical(
-        self,
-        nodes: list[dict[str, Any]],
-        parent_db_id: int | None,
-        out: list[FilesterFolder],
-        seen: set[str],
-    ) -> None:
-        for raw in nodes:
-            parsed = self._parse_folder(raw)
-            if not parsed:
-                continue
-            folder = parsed
-            if folder.parent_db_id is None and parent_db_id is not None:
-                folder = FilesterFolder(
-                    identifier=folder.identifier,
-                    name=folder.name,
-                    db_id=folder.db_id,
-                    parent_db_id=parent_db_id,
-                )
-            if folder.identifier not in seen:
-                out.append(folder)
-                seen.add(folder.identifier)
-            child_parent = folder.db_id
-            subs = raw.get("subfolders") or []
-            if subs:
-                self._walk_hierarchical(subs, child_parent, out, seen)
 
     def folder_index(self, *, refresh: bool = False) -> FolderIndex:
         if self._folder_index is None or refresh:
@@ -277,6 +237,32 @@ class FilesterClient:
                     return candidate
         return FilesterFolder(identifier=identifier, name=name or "", db_id=None)
 
+    def list_child_folders(self, parent_identifier: str) -> list[FilesterFolder]:
+        """List folders inside a parent. Tries several undocumented query styles."""
+        folders: list[FilesterFolder] = []
+        seen: set[str] = set()
+        candidates = [
+            f"/api/v1/folder/{parent_identifier}/folders",
+            f"/api/v1/folders?parent={parent_identifier}",
+            f"/api/v1/folders?parent_id={parent_identifier}",
+        ]
+        for path in candidates:
+            try:
+                data = self._request("GET", path)
+            except httpx.HTTPError:
+                continue
+            rows = data.get("data")
+            if not isinstance(rows, list):
+                continue
+            for raw in rows:
+                if not isinstance(raw, dict):
+                    continue
+                folder = self._parse_folder(raw)
+                if folder and folder.identifier not in seen:
+                    folders.append(folder)
+                    seen.add(folder.identifier)
+        return folders
+
     def find_folder(
         self,
         name: str,
@@ -284,12 +270,31 @@ class FilesterClient:
         parent_db_id: int | None = None,
         parent_identifier: str | None = None,
     ) -> FilesterFolder | None:
-        index = self.folder_index(refresh=True)
-        return index.find_child(
-            name,
-            parent_db_id=parent_db_id,
-            parent_identifier=parent_identifier,
-        )
+        if parent_identifier:
+            for child in self.list_child_folders(parent_identifier):
+                if child.name == name:
+                    return child
+            index = self.folder_index()
+            return index.find_child(
+                name,
+                parent_db_id=parent_db_id,
+                parent_identifier=parent_identifier,
+            )
+
+        index = self.folder_index(refresh=parent_db_id is None)
+        if parent_db_id is not None:
+            return index.find_child(name, parent_db_id=parent_db_id)
+
+        matches = [f for f in index.all_folders() if f.name == name]
+        if not matches:
+            return None
+        if len(matches) > 1:
+            logger.warning(
+                "Multiple root Filester folders named %r; using %s",
+                name,
+                matches[0].identifier,
+            )
+        return matches[0]
 
     @staticmethod
     def _identifier_from_error(exc: httpx.HTTPStatusError) -> str | None:
@@ -305,10 +310,6 @@ class FilesterClient:
                 value = data.get(key)
                 if isinstance(value, str) and value:
                     return value
-        for key in ("identifier", "folder_id"):
-            value = body.get(key)
-            if isinstance(value, str) and value:
-                return value
         return None
 
     def create_folder(
@@ -326,84 +327,70 @@ class FilesterClient:
         )
         if existing:
             logger.info(
-                "Reusing existing Filester folder %r -> %s",
+                "Reusing Filester folder %r -> %s (parent=%s)",
                 name,
                 existing.identifier,
+                parent_identifier or "root",
             )
             return existing
 
-        base: dict[str, object] = {"name": name[:100], "public": public}
-        payloads: list[dict[str, object]] = []
-        if parent_db_id:
-            payloads.append({**base, "parent_id": parent_db_id})
-        if parent_identifier:
-            payloads.append({**base, "parent_id": parent_identifier})
-            payloads.append({**base, "parent_folder_id": parent_identifier})
-        if not payloads:
-            payloads.append(base)
+        payload: dict[str, object] = {"name": name[:100], "public": public}
+        if parent_db_id is not None:
+            payload["parent_id"] = parent_db_id
+        elif parent_identifier:
+            payload["parent_id"] = parent_identifier
 
-        last_error: Exception | None = None
-        created_identifier: str | None = None
-        for payload in payloads:
-            for endpoint in ("/api/folder/create", "/api/v1/folder"):
-                try:
-                    data = self._post_folder(endpoint, payload)
-                    folder = self._parse_folder(data.get("data", {}))
-                    if folder and folder.identifier:
-                        created_identifier = folder.identifier
-                        resolved = self.resolve_folder(folder.identifier, name)
-                        if self._folder_index is not None:
-                            self._folder_index.add(resolved)
-                        logger.info(
-                            "Created Filester folder %r -> %s (db_id=%s, parent=%s)",
-                            name,
-                            resolved.identifier,
-                            resolved.db_id,
-                            parent_db_id or parent_identifier,
-                        )
-                        return resolved
-                    identifier = str((data.get("data") or {}).get("identifier", ""))
-                    if identifier:
-                        created_identifier = identifier
-                        resolved = self.resolve_folder(identifier, name)
-                        if self._folder_index is not None:
-                            self._folder_index.add(resolved)
-                        return resolved
-                except httpx.HTTPStatusError as exc:
-                    last_error = exc
-                    if exc.response.status_code == 409:
-                        conflict = self.find_folder(
-                            name,
-                            parent_db_id=parent_db_id,
-                            parent_identifier=parent_identifier,
-                        )
-                        if conflict:
-                            logger.info(
-                                "Folder %r already exists -> %s (409)",
-                                name,
-                                conflict.identifier,
-                            )
-                            return conflict
-                        conflict_id = self._identifier_from_error(exc)
-                        if conflict_id:
-                            resolved = self.resolve_folder(conflict_id, name)
-                            logger.info(
-                                "Folder %r already exists -> %s (409 body)",
-                                name,
-                                resolved.identifier,
-                            )
-                            return resolved
-                    logger.debug(
-                        "Filester %s failed for %r (payload keys %s): %s",
-                        endpoint,
+        try:
+            data = self._post_folder("/api/v1/folder", payload)
+        except httpx.HTTPStatusError as exc:
+            if exc.response.status_code == 409:
+                conflict = self.find_folder(
+                    name,
+                    parent_db_id=parent_db_id,
+                    parent_identifier=parent_identifier,
+                )
+                if conflict:
+                    logger.info(
+                        "Folder %r already exists -> %s (409)",
                         name,
-                        list(payload.keys()),
-                        exc,
+                        conflict.identifier,
                     )
+                    return conflict
+                conflict_id = self._identifier_from_error(exc)
+                if conflict_id:
+                    return self.resolve_folder(conflict_id, name)
+            raise RuntimeError(f"Failed to create folder {name!r}: {exc}") from exc
 
-        if created_identifier:
-            return self.resolve_folder(created_identifier, name)
-        raise RuntimeError(f"Failed to create folder {name!r}: {last_error}")
+        folder = self._parse_folder_from_create(data)
+        if folder:
+            if self._folder_index is not None:
+                self._folder_index.add(folder)
+            logger.info(
+                "Created Filester folder %r -> %s (parent=%s)",
+                name,
+                folder.identifier,
+                parent_identifier or parent_db_id or "root",
+            )
+            return folder
+
+        raise RuntimeError(f"Failed to create folder {name!r}: {data}")
+
+    @staticmethod
+    def _parse_folder_from_create(data: dict[str, Any]) -> FilesterFolder | None:
+        block = data.get("data")
+        if not isinstance(block, dict):
+            return None
+        nested = block.get("folder")
+        if isinstance(nested, dict):
+            folder = FilesterClient._parse_folder(nested)
+            if folder:
+                return folder
+        identifier = str(block.get("identifier") or "")
+        if identifier:
+            nested_name = nested.get("name") if isinstance(nested, dict) else ""
+            folder_name = str(block.get("name") or nested_name or "")
+            return FilesterFolder(identifier=identifier, name=folder_name or identifier)
+        return FilesterClient._parse_folder(block)
 
     def upload_file(self, file_path: str | Path, folder_id: str | None = None) -> dict[str, Any]:
         file_path = Path(file_path)
