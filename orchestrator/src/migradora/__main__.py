@@ -5,10 +5,12 @@ from __future__ import annotations
 import argparse
 import json
 import sys
+from pathlib import Path
 
 from migradora.config import Settings
 from migradora.discovery.api_discovery import discover_and_enqueue
 from migradora.filester_probe import configure_probe_parser, run_probe_args
+from migradora.job_cleanup import clear_all_downloads
 from migradora.logger import setup_logging
 from migradora.models import QueueState
 from migradora.orchestrator import run_orchestrator
@@ -65,6 +67,40 @@ def cmd_run(settings: Settings) -> int:
     return 0
 
 
+def cmd_reset(settings: Settings, *, yes: bool, discover_after: bool) -> int:
+    if not yes:
+        print(
+            "This deletes all queue jobs, Filester folder mappings, and local job downloads.\n"
+            "Re-run with: python -m migradora reset --yes",
+            file=sys.stderr,
+        )
+        return 1
+
+    queue = QueueManager(settings.db_path)
+    counts = queue.reset_queue()
+    removed = clear_all_downloads(settings.download_dir)
+
+    heartbeat = Path(settings.state_dir) / "pipeline.heartbeat"
+    if heartbeat.exists():
+        heartbeat.unlink(missing_ok=True)
+
+    result: dict[str, object] = {
+        **counts,
+        "download_dirs_removed": len(removed),
+        "queue_state": "running",
+    }
+
+    if discover_after:
+        result["discover"] = discover_and_enqueue(settings, force=False)
+
+    print(json.dumps(result, indent=2))
+    print(
+        "\nQueue reset. Run `python -m migradora discover` if you did not pass --discover.",
+        file=sys.stderr,
+    )
+    return 0
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(description="Migradora: Gofile → Filester mirror")
     sub = parser.add_subparsers(dest="command", required=True)
@@ -73,6 +109,20 @@ def main() -> int:
     sub.add_parser("status", help="Show queue status")
     sub.add_parser("resume", help="Resume paused queue")
     sub.add_parser("retry-failed", help="Reset failed jobs to pending and resume queue")
+    reset_p = sub.add_parser(
+        "reset",
+        help="Wipe queue database, folder mappings, and local job downloads",
+    )
+    reset_p.add_argument(
+        "--yes",
+        action="store_true",
+        help="Confirm destructive reset",
+    )
+    reset_p.add_argument(
+        "--discover",
+        action="store_true",
+        help="Run discover immediately after reset",
+    )
     sub.add_parser("run", help="Run orchestrator with dashboard")
     probe = sub.add_parser("filester-probe", help="Probe Filester folder API")
     configure_probe_parser(probe)
@@ -86,6 +136,9 @@ def main() -> int:
 
     if args.command == "filester-probe":
         return run_probe_args(args)
+
+    if args.command == "reset":
+        return cmd_reset(settings, yes=args.yes, discover_after=args.discover)
 
     commands = {
         "discover": lambda: cmd_discover(settings, args.force),

@@ -312,6 +312,21 @@ class QueueManager:
             cur = conn.execute("DELETE FROM folders")
             return cur.rowcount
 
+    def reset_queue(self) -> dict[str, int]:
+        """Delete all jobs, folder mappings, and resume the queue."""
+        with self.connection() as conn:
+            files_deleted = conn.execute("DELETE FROM files").rowcount
+            folders_deleted = conn.execute("DELETE FROM folders").rowcount
+            conn.execute(
+                """UPDATE queue_control SET state=?, pause_reason='', updated_at=?
+                   WHERE id=1""",
+                (QueueState.RUNNING.value, utc_now()),
+            )
+        return {
+            "files_deleted": files_deleted,
+            "folders_deleted": folders_deleted,
+        }
+
     def get_stats(self) -> QueueStats:
         with self.connection() as conn:
             rows = conn.execute(

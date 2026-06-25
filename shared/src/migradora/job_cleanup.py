@@ -30,3 +30,16 @@ def cleanup_job_files(
             removed.append(str(path))
 
     return removed
+
+
+def clear_all_downloads(download_dir: str) -> list[str]:
+    """Remove all job-* directories under the download root."""
+    removed: list[str] = []
+    base = Path(download_dir)
+    if not base.is_dir():
+        return removed
+    for path in base.iterdir():
+        if path.is_dir() and path.name.startswith("job-"):
+            shutil.rmtree(path, ignore_errors=True)
+            removed.append(str(path))
+    return removed
