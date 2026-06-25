@@ -63,7 +63,31 @@ class FolderIndex:
                 if hit:
                     return hit
         if parent_db_id is None and parent_identifier is None:
-            return self.get(None, name)
+            hit = self.get(None, name)
+            if hit:
+                return hit
+
+        return self._find_by_name_fallback(name, parent_db_id, parent_identifier)
+
+    def _find_by_name_fallback(
+        self,
+        name: str,
+        parent_db_id: int | None,
+        parent_identifier: str | None,
+    ) -> FilesterFolder | None:
+        matches = [f for f in self.all_folders() if f.name == name]
+        if parent_db_id is not None:
+            matches = [f for f in matches if f.parent_db_id == parent_db_id]
+        elif parent_identifier:
+            parent = self.by_identifier(parent_identifier)
+            if parent and parent.db_id is not None:
+                matches = [f for f in matches if f.parent_db_id == parent.db_id]
+            else:
+                return None
+        else:
+            matches = [f for f in matches if f.parent_db_id is None]
+        if len(matches) == 1:
+            return matches[0]
         return None
 
 
@@ -118,6 +142,24 @@ class FilesterClient:
                     continue
                 raise exc
         return {}
+
+    def _post_folder(self, endpoint: str, payload: dict[str, object]) -> dict[str, Any]:
+        return self._request("POST", endpoint, json=payload)
+
+    def _raw_request(
+        self, method: str, path: str, **kwargs: Any
+    ) -> tuple[int, dict[str, Any] | None, str]:
+        resp = self._client.request(method, path, **kwargs)
+        body: dict[str, Any] | None = None
+        text = resp.text or ""
+        if resp.content:
+            try:
+                parsed = resp.json()
+                if isinstance(parsed, dict):
+                    body = parsed
+            except ValueError:
+                body = None
+        return resp.status_code, body, text
 
     def get_account(self) -> dict[str, Any]:
         data = self._request("GET", "/api/v1/account")
@@ -235,6 +277,40 @@ class FilesterClient:
                     return candidate
         return FilesterFolder(identifier=identifier, name=name or "", db_id=None)
 
+    def find_folder(
+        self,
+        name: str,
+        *,
+        parent_db_id: int | None = None,
+        parent_identifier: str | None = None,
+    ) -> FilesterFolder | None:
+        index = self.folder_index(refresh=True)
+        return index.find_child(
+            name,
+            parent_db_id=parent_db_id,
+            parent_identifier=parent_identifier,
+        )
+
+    @staticmethod
+    def _identifier_from_error(exc: httpx.HTTPStatusError) -> str | None:
+        try:
+            body = exc.response.json()
+        except ValueError:
+            return None
+        if not isinstance(body, dict):
+            return None
+        data = body.get("data")
+        if isinstance(data, dict):
+            for key in ("identifier", "id", "folder_id"):
+                value = data.get(key)
+                if isinstance(value, str) and value:
+                    return value
+        for key in ("identifier", "folder_id"):
+            value = body.get(key)
+            if isinstance(value, str) and value:
+                return value
+        return None
+
     def create_folder(
         self,
         name: str,
@@ -243,6 +319,19 @@ class FilesterClient:
         parent_identifier: str | None = None,
         public: int = 1,
     ) -> FilesterFolder:
+        existing = self.find_folder(
+            name,
+            parent_db_id=parent_db_id,
+            parent_identifier=parent_identifier,
+        )
+        if existing:
+            logger.info(
+                "Reusing existing Filester folder %r -> %s",
+                name,
+                existing.identifier,
+            )
+            return existing
+
         base: dict[str, object] = {"name": name[:100], "public": public}
         payloads: list[dict[str, object]] = []
         if parent_db_id:
@@ -258,7 +347,7 @@ class FilesterClient:
         for payload in payloads:
             for endpoint in ("/api/folder/create", "/api/v1/folder"):
                 try:
-                    data = self._request("POST", endpoint, json=payload)
+                    data = self._post_folder(endpoint, payload)
                     folder = self._parse_folder(data.get("data", {}))
                     if folder and folder.identifier:
                         created_identifier = folder.identifier
@@ -266,7 +355,7 @@ class FilesterClient:
                         if self._folder_index is not None:
                             self._folder_index.add(resolved)
                         logger.info(
-                            "Created Filester folder %r -> %s (db_id=%s, parent_db_id=%s)",
+                            "Created Filester folder %r -> %s (db_id=%s, parent=%s)",
                             name,
                             resolved.identifier,
                             resolved.db_id,
@@ -280,8 +369,30 @@ class FilesterClient:
                         if self._folder_index is not None:
                             self._folder_index.add(resolved)
                         return resolved
-                except httpx.HTTPError as exc:
+                except httpx.HTTPStatusError as exc:
                     last_error = exc
+                    if exc.response.status_code == 409:
+                        conflict = self.find_folder(
+                            name,
+                            parent_db_id=parent_db_id,
+                            parent_identifier=parent_identifier,
+                        )
+                        if conflict:
+                            logger.info(
+                                "Folder %r already exists -> %s (409)",
+                                name,
+                                conflict.identifier,
+                            )
+                            return conflict
+                        conflict_id = self._identifier_from_error(exc)
+                        if conflict_id:
+                            resolved = self.resolve_folder(conflict_id, name)
+                            logger.info(
+                                "Folder %r already exists -> %s (409 body)",
+                                name,
+                                resolved.identifier,
+                            )
+                            return resolved
                     logger.debug(
                         "Filester %s failed for %r (payload keys %s): %s",
                         endpoint,

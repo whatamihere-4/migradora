@@ -7,7 +7,7 @@ import json
 import sys
 
 from migradora.config import Settings
-from migradora.discovery.api_discovery import discover_and_enqueue
+from migradora.filester_probe import run_probe
 from migradora.logger import setup_logging
 from migradora.models import QueueState
 from migradora.orchestrator import run_orchestrator
@@ -73,6 +73,12 @@ def main() -> int:
     sub.add_parser("resume", help="Resume paused queue")
     sub.add_parser("retry-failed", help="Reset failed jobs to pending and resume queue")
     sub.add_parser("run", help="Run orchestrator with dashboard")
+    probe = sub.add_parser("filester-probe", help="Probe Filester folder API (list/create tests)")
+    probe.add_argument("--name", default="migradora-probe-test")
+    probe.add_argument("--parent-db-id", type=int, default=None)
+    probe.add_argument("--parent-identifier", default=None)
+    probe.add_argument("--search", default=None)
+    probe.add_argument("--dry-run", action="store_true")
 
     parser.add_argument("--force", action="store_true", help="Re-enqueue uploaded files (discover)")
     args = parser.parse_args()
@@ -80,6 +86,20 @@ def main() -> int:
     settings = Settings.load()
     settings.ensure_dirs()
     setup_logging("orchestrator", settings.log_dir, settings.log_level)
+
+    if args.command == "filester-probe":
+        probe_argv = []
+        if args.name != "migradora-probe-test":
+            probe_argv.extend(["--name", args.name])
+        if args.parent_db_id is not None:
+            probe_argv.extend(["--parent-db-id", str(args.parent_db_id)])
+        if args.parent_identifier:
+            probe_argv.extend(["--parent-identifier", args.parent_identifier])
+        if args.search:
+            probe_argv.extend(["--search", args.search])
+        if args.dry_run:
+            probe_argv.append("--dry-run")
+        return run_probe(probe_argv)
 
     commands = {
         "discover": lambda: cmd_discover(settings, args.force),
