@@ -32,6 +32,15 @@ def write_heartbeat(state_dir: str) -> None:
     Path(state_dir, "pipeline.heartbeat").write_text(str(time.time()))
 
 
+def _job_upload_folder_path(job) -> str:
+    if job.parent_folder_path:
+        return job.parent_folder_path
+    gofile_path = job.gofile_path or ""
+    if "/" in gofile_path:
+        return gofile_path.rsplit("/", 1)[0]
+    return ""
+
+
 def cleanup_dir(path: Path) -> None:
     if path.is_file():
         path.unlink(missing_ok=True)
@@ -223,7 +232,17 @@ class PipelineCoordinator:
             retry_delay=self.settings.upload_retry_delay_sec,
         ) as filester:
             folder_id = ensure_filester_folder_path(
-                filester, self.queue, self.settings, job.parent_folder_path, self._folder_cache
+                filester,
+                self.queue,
+                self.settings,
+                _job_upload_folder_path(job),
+                self._folder_cache,
+            )
+            logger.info(
+                "Job %d uploading to Filester folder %s (gofile path %r)",
+                job.id,
+                folder_id,
+                _job_upload_folder_path(job) or job.gofile_path,
             )
             for part in iter_upload_parts(
                 local_path,

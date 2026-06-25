@@ -301,6 +301,11 @@ class QueueManager:
             )
             return cur.rowcount
 
+    def clear_all_folder_mappings(self) -> int:
+        with self.connection() as conn:
+            cur = conn.execute("DELETE FROM folders")
+            return cur.rowcount
+
     def get_stats(self) -> QueueStats:
         with self.connection() as conn:
             rows = conn.execute(

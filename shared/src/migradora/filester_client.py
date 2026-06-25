@@ -42,6 +42,30 @@ class FolderIndex:
     def by_identifier(self, identifier: str) -> FilesterFolder | None:
         return self._by_identifier.get(identifier)
 
+    def all_folders(self) -> list[FilesterFolder]:
+        return list(self._by_identifier.values())
+
+    def find_child(
+        self,
+        name: str,
+        *,
+        parent_db_id: int | None = None,
+        parent_identifier: str | None = None,
+    ) -> FilesterFolder | None:
+        if parent_db_id is not None:
+            hit = self.get(parent_db_id, name)
+            if hit:
+                return hit
+        if parent_identifier:
+            parent = self.by_identifier(parent_identifier)
+            if parent and parent.db_id is not None:
+                hit = self.get(parent.db_id, name)
+                if hit:
+                    return hit
+        if parent_db_id is None and parent_identifier is None:
+            return self.get(None, name)
+        return None
+
 
 class FilesterClient:
     def __init__(
@@ -105,19 +129,20 @@ class FilesterClient:
         if not name:
             return None
 
-        identifier = raw.get("identifier") or raw.get("slug") or ""
+        identifier = str(raw.get("identifier") or raw.get("slug") or "").strip()
         db_id: int | None = None
         for key in ("id", "ID", "folder_id"):
             value = raw.get(key)
-            if isinstance(value, int):
+            if isinstance(value, int) and value > 0:
                 db_id = value
-                if not identifier:
-                    identifier = str(value)
+                break
+            if isinstance(value, str) and value.isdigit():
+                db_id = int(value)
                 break
 
         if not identifier:
             value = raw.get("id")
-            if isinstance(value, str) and value:
+            if isinstance(value, str) and value and not value.isdigit():
                 identifier = value
 
         if not identifier:
@@ -127,9 +152,11 @@ class FilesterClient:
         parent_db_id: int | None = None
         if isinstance(parent_raw, int) and parent_raw > 0:
             parent_db_id = parent_raw
+        elif isinstance(parent_raw, str) and parent_raw.isdigit():
+            parent_db_id = int(parent_raw)
 
         return FilesterFolder(
-            identifier=str(identifier),
+            identifier=identifier,
             name=name,
             db_id=db_id,
             parent_db_id=parent_db_id,
@@ -151,7 +178,8 @@ class FilesterClient:
 
         try:
             data = self._request("GET", "/api/user/folders")
-        except httpx.HTTPError:
+        except httpx.HTTPError as exc:
+            logger.warning("Filester /api/user/folders unavailable: %s", exc)
             return folders
 
         for raw in data.get("folders") or []:
@@ -195,41 +223,75 @@ class FilesterClient:
             self._folder_index = FolderIndex(self._load_folders())
         return self._folder_index
 
+    def resolve_folder(self, identifier: str, name: str | None = None) -> FilesterFolder:
+        """Reload folder list and return the best match for a folder identifier."""
+        index = self.folder_index(refresh=True)
+        folder = index.by_identifier(identifier)
+        if folder:
+            return folder
+        if name:
+            for candidate in index.all_folders():
+                if candidate.name == name and candidate.identifier == identifier:
+                    return candidate
+        return FilesterFolder(identifier=identifier, name=name or "", db_id=None)
+
     def create_folder(
         self,
         name: str,
         *,
         parent_db_id: int | None = None,
+        parent_identifier: str | None = None,
         public: int = 1,
     ) -> FilesterFolder:
-        payload: dict[str, object] = {"name": name[:100], "public": public}
+        base: dict[str, object] = {"name": name[:100], "public": public}
+        payloads: list[dict[str, object]] = []
         if parent_db_id:
-            payload["parent_id"] = parent_db_id
+            payloads.append({**base, "parent_id": parent_db_id})
+        if parent_identifier:
+            payloads.append({**base, "parent_id": parent_identifier})
+            payloads.append({**base, "parent_folder_id": parent_identifier})
+        if not payloads:
+            payloads.append(base)
 
         last_error: Exception | None = None
-        for endpoint in ("/api/v1/folder", "/api/folder/create"):
-            try:
-                data = self._request("POST", endpoint, json=payload)
-                folder = self._parse_folder(data.get("data", {}))
-                if folder:
-                    if self._folder_index is not None:
-                        self._folder_index.add(folder)
-                    return folder
-                identifier = (data.get("data") or {}).get("identifier", "")
-                if identifier:
-                    created = FilesterFolder(
-                        identifier=str(identifier),
-                        name=name,
-                        db_id=None,
-                        parent_db_id=parent_db_id,
+        created_identifier: str | None = None
+        for payload in payloads:
+            for endpoint in ("/api/folder/create", "/api/v1/folder"):
+                try:
+                    data = self._request("POST", endpoint, json=payload)
+                    folder = self._parse_folder(data.get("data", {}))
+                    if folder and folder.identifier:
+                        created_identifier = folder.identifier
+                        resolved = self.resolve_folder(folder.identifier, name)
+                        if self._folder_index is not None:
+                            self._folder_index.add(resolved)
+                        logger.info(
+                            "Created Filester folder %r -> %s (db_id=%s, parent_db_id=%s)",
+                            name,
+                            resolved.identifier,
+                            resolved.db_id,
+                            parent_db_id or parent_identifier,
+                        )
+                        return resolved
+                    identifier = str((data.get("data") or {}).get("identifier", ""))
+                    if identifier:
+                        created_identifier = identifier
+                        resolved = self.resolve_folder(identifier, name)
+                        if self._folder_index is not None:
+                            self._folder_index.add(resolved)
+                        return resolved
+                except httpx.HTTPError as exc:
+                    last_error = exc
+                    logger.debug(
+                        "Filester %s failed for %r (payload keys %s): %s",
+                        endpoint,
+                        name,
+                        list(payload.keys()),
+                        exc,
                     )
-                    if self._folder_index is not None:
-                        self._folder_index.add(created)
-                    return created
-            except httpx.HTTPError as exc:
-                last_error = exc
-                logger.debug("Filester %s failed for %r: %s", endpoint, name, exc)
 
+        if created_identifier:
+            return self.resolve_folder(created_identifier, name)
         raise RuntimeError(f"Failed to create folder {name!r}: {last_error}")
 
     def upload_file(self, file_path: str | Path, folder_id: str | None = None) -> dict[str, Any]:
