@@ -38,9 +38,14 @@ class QueueManager:
         download_link: str | None = None,
         parent_folder_path: str = "",
         force: bool = False,
+        *,
+        initial_status: FileStatus = FileStatus.PENDING,
+        skip_reason: str | None = None,
     ) -> int | None:
         now = utc_now()
         url = gofile_url or download_link
+        status = initial_status.value
+        last_error = skip_reason if initial_status == FileStatus.SKIPPED else None
         with self.connection() as conn:
             existing = conn.execute(
                 "SELECT id, status FROM files WHERE gofile_content_id = ?",
@@ -61,8 +66,8 @@ class QueueManager:
                 """INSERT INTO files (
                     gofile_content_id, gofile_path, filename, size_bytes,
                     download_link, gofile_url, status, parent_folder_path,
-                    created_at, updated_at
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                    last_error, created_at, updated_at
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
                 (
                     gofile_content_id,
                     gofile_path,
@@ -70,8 +75,9 @@ class QueueManager:
                     size_bytes,
                     download_link,
                     url,
-                    FileStatus.PENDING.value,
+                    status,
                     parent_folder_path,
+                    last_error,
                     now,
                     now,
                 ),

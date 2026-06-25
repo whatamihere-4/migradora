@@ -7,7 +7,8 @@ import json
 import sys
 
 from migradora.config import Settings
-from migradora.filester_probe import run_probe
+from migradora.discovery.api_discovery import discover_and_enqueue
+from migradora.filester_probe import configure_probe_parser, run_probe_args
 from migradora.logger import setup_logging
 from migradora.models import QueueState
 from migradora.orchestrator import run_orchestrator
@@ -73,15 +74,8 @@ def main() -> int:
     sub.add_parser("resume", help="Resume paused queue")
     sub.add_parser("retry-failed", help="Reset failed jobs to pending and resume queue")
     sub.add_parser("run", help="Run orchestrator with dashboard")
-    probe = sub.add_parser(
-        "filester-probe",
-        help="Probe Filester folder API (pass --help after filester-probe for options)",
-    )
-    probe.add_argument(
-        "probe_args",
-        nargs=argparse.REMAINDER,
-        help="Arguments forwarded to filester-probe (e.g. --probe-move --folder-identifier ID)",
-    )
+    probe = sub.add_parser("filester-probe", help="Probe Filester folder API")
+    configure_probe_parser(probe)
 
     parser.add_argument("--force", action="store_true", help="Re-enqueue uploaded files (discover)")
     args = parser.parse_args()
@@ -91,10 +85,7 @@ def main() -> int:
     setup_logging("orchestrator", settings.log_dir, settings.log_level)
 
     if args.command == "filester-probe":
-        probe_argv = [a for a in args.probe_args if a != "--"]
-        if not probe_argv or probe_argv == ["--help"] or "-h" in probe_argv:
-            return run_probe(["--help"])
-        return run_probe(probe_argv)
+        return run_probe_args(args)
 
     commands = {
         "discover": lambda: cmd_discover(settings, args.force),

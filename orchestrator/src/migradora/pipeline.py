@@ -13,7 +13,8 @@ from migradora.filester_client import FilesterClient
 from migradora.gofile_client import GofileClient
 from migradora.models import FileStatus, QueueState
 from migradora.queue.manager import QueueManager
-from migradora.splitter import iter_upload_parts, required_disk_bytes
+from migradora.splitter import iter_upload_parts
+from migradora.size_limits import oversize_skip_reason, required_disk_gb
 from migradora.utils import free_disk_gb
 
 from migradora.filester_folders import CachedFolder, ensure_filester_folder_path
@@ -150,12 +151,17 @@ class PipelineCoordinator:
         job_dir = Path(self.settings.download_dir) / f"job-{job.id}"
         job_dir.mkdir(parents=True, exist_ok=True)
 
+        skip_reason = oversize_skip_reason(job.size_bytes, self.settings)
+        if skip_reason:
+            logger.warning("Auto-skipping job %d (%s): %s", job.id, job.filename, skip_reason)
+            self.queue.mark_skipped(job.id, skip_reason)
+            self._current_phase = "idle"
+            self._current_job_id = None
+            self._current_job_name = ""
+            return
+
         if job.size_bytes:
-            need_gb = (
-                required_disk_bytes(job.size_bytes, self.settings.filester_max_file_bytes)
-                / (1024**3)
-                + self.settings.min_free_disk_gb
-            )
+            need_gb = required_disk_gb(job.size_bytes, self.settings)
             free_gb = free_disk_gb(self.settings.download_dir)
             if free_gb < need_gb:
                 self.queue.update_file(job.id, status=FileStatus.PENDING)

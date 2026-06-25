@@ -215,8 +215,7 @@ def _probe_create_variants(
         time.sleep(0.3)
 
 
-def run_probe(argv: list[str] | None = None) -> int:
-    parser = argparse.ArgumentParser(description="Probe Filester folder API behavior")
+def configure_probe_parser(parser: argparse.ArgumentParser) -> None:
     parser.add_argument("--name", default="migradora-probe-test", help="Folder name for create probes")
     parser.add_argument("--parent-db-id", type=int, default=None, help="Numeric parent folder id")
     parser.add_argument("--parent-identifier", default=None, help="Parent folder identifier slug")
@@ -237,8 +236,9 @@ def run_probe(argv: list[str] | None = None) -> int:
         default=None,
         help="Folder to move (with --probe-move)",
     )
-    args = parser.parse_args(argv)
 
+
+def run_probe_args(args: argparse.Namespace) -> int:
     settings = Settings.load()
     if not settings.filester_api_key:
         print("FILESTER_API_KEY is not set", file=sys.stderr)
@@ -325,6 +325,13 @@ def run_probe(argv: list[str] | None = None) -> int:
     print("  Nesting: POST /api/v1/folder with parent_id=<parent folder identifier>.")
     print("  If 409 DUPLICATE_NAME: rename/delete root folder with that name first.")
     return 0
+
+
+def run_probe(argv: list[str] | None = None) -> int:
+    parser = argparse.ArgumentParser(description="Probe Filester folder API behavior")
+    configure_probe_parser(parser)
+    args = parser.parse_args(argv)
+    return run_probe_args(args)
 
 
 if __name__ == "__main__":
