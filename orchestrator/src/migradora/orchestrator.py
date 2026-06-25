@@ -9,8 +9,9 @@ from pathlib import Path
 
 from migradora.config import Settings
 from migradora.discovery.api_discovery import discover_and_enqueue
+from migradora.job_cleanup import cleanup_job_files
 from migradora.logger import setup_logging
-from migradora.models import QueueState
+from migradora.models import FileStatus, QueueState
 from migradora.monitor.filester_storage import FilesterStorageMonitor
 from migradora.pipeline import PipelineCoordinator
 from migradora.queue.manager import QueueManager
@@ -75,6 +76,24 @@ class Orchestrator:
     def pause(self, reason: str = "manual") -> None:
         self.queue.set_queue_state(QueueState.PAUSED, reason)
         logger.info("Queue paused: %s", reason)
+
+    def skip_job(self, job_id: int) -> dict[str, object]:
+        record = self.queue.get_file(job_id)
+        if not record:
+            raise ValueError(f"Job {job_id} not found")
+        if record.status == FileStatus.UPLOADED:
+            raise ValueError("Cannot skip an uploaded job")
+        if record.status == FileStatus.SKIPPED:
+            return {"status": "already_skipped", "job_id": job_id, "removed": []}
+
+        if self.pipeline._current_job_id == job_id:
+            self.pipeline.request_skip(job_id)
+            return {"status": "skip_requested", "job_id": job_id, "removed": []}
+
+        removed = cleanup_job_files(self.settings, job_id, record.local_path)
+        self.queue.mark_skipped(job_id)
+        logger.info("Skipped job %d; removed %s", job_id, removed)
+        return {"status": "skipped", "job_id": job_id, "removed": removed}
 
     def stop(self) -> None:
         self._stop.set()

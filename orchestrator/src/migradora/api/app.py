@@ -6,7 +6,7 @@ import time
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
-from fastapi import FastAPI, Query
+from fastapi import FastAPI, HTTPException, Query
 from fastapi.responses import HTMLResponse
 
 from migradora.config import Settings
@@ -101,6 +101,7 @@ def create_app(settings: Settings, orchestrator: Orchestrator) -> FastAPI:
                 "uploading": stats.uploading,
                 "uploaded": stats.uploaded,
                 "failed": stats.failed,
+                "skipped": stats.skipped,
                 "completion_pct": round(stats.completion_pct, 2),
                 "total_bytes": stats.total_bytes,
                 "uploaded_bytes": stats.uploaded_bytes,
@@ -142,5 +143,12 @@ def create_app(settings: Settings, orchestrator: Orchestrator) -> FastAPI:
     def discover(force: bool = False) -> dict[str, Any]:
         result = orchestrator.discover(force=force)
         return {"status": "ok", **result}
+
+    @app.post("/jobs/{job_id}/skip")
+    def skip_job(job_id: int) -> dict[str, Any]:
+        try:
+            return orchestrator.skip_job(job_id)
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
 
     return app

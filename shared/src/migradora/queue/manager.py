@@ -240,6 +240,14 @@ class QueueManager:
                     (FileStatus.FAILED.value, error, utc_now(), file_id),
                 )
 
+    def mark_skipped(self, file_id: int, reason: str = "Skipped by user") -> None:
+        with self.connection() as conn:
+            conn.execute(
+                """UPDATE files SET status=?, last_error=?, local_path=NULL,
+                   updated_at=? WHERE id=? AND is_part=0""",
+                (FileStatus.SKIPPED.value, reason, utc_now(), file_id),
+            )
+
     def requeue_job(self, file_id: int, error: str) -> None:
         """Return job to pending without counting the failed attempt."""
         with self.connection() as conn:

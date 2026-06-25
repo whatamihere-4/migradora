@@ -17,8 +17,15 @@ from migradora.splitter import iter_upload_parts, required_disk_bytes
 from migradora.utils import free_disk_gb
 
 from migradora.filester_folders import CachedFolder, ensure_filester_folder_path
+from migradora.job_cleanup import cleanup_job_files
 
 logger = logging.getLogger("migradora.pipeline")
+
+
+class JobSkipped(Exception):
+    def __init__(self, job_id: int) -> None:
+        self.job_id = job_id
+        super().__init__(f"Job {job_id} skipped")
 
 
 def write_heartbeat(state_dir: str) -> None:
@@ -44,6 +51,7 @@ class PipelineCoordinator:
         self._progress_bytes: int = 0
         self._progress_total: int = 0
         self._last_touch_at: float = 0.0
+        self._skip_job_id: int | None = None
 
     @property
     def status(self) -> dict:
@@ -57,6 +65,26 @@ class PipelineCoordinator:
 
     def stop(self) -> None:
         self._stop.set()
+
+    def request_skip(self, job_id: int) -> None:
+        self._skip_job_id = job_id
+
+    def _check_skip(self, job_id: int) -> None:
+        if self._skip_job_id == job_id:
+            raise JobSkipped(job_id)
+
+    def _finish_skip(self, job_id: int) -> None:
+        record = self.queue.get_file(job_id)
+        local_path = record.local_path if record else None
+        cleanup_job_files(self.settings, job_id, local_path)
+        self.queue.mark_skipped(job_id)
+        self._skip_job_id = None
+        self._current_phase = "idle"
+        self._current_job_id = None
+        self._current_job_name = ""
+        self._progress_bytes = 0
+        self._progress_total = 0
+        logger.info("Job %d skipped; local files removed", job_id)
 
     def run_loop(self) -> None:
         logger.info("Pipeline started")
@@ -91,6 +119,8 @@ class PipelineCoordinator:
             self._current_job_name = job.filename
             try:
                 self._process_job(job)
+            except JobSkipped as exc:
+                self._finish_skip(exc.job_id)
             except Exception as exc:
                 logger.error("Pipeline failed for job %d: %s", job.id, exc)
                 self._progress_bytes = 0
@@ -142,6 +172,7 @@ class PipelineCoordinator:
         self.queue.update_file(job.id, status=FileStatus.DOWNLOADING)
 
         def on_download_progress(done: int, total: int | None) -> None:
+            self._check_skip(job.id)
             self._progress_bytes = done
             if total:
                 self._progress_total = total
@@ -199,7 +230,9 @@ class PipelineCoordinator:
                 job_dir,
                 self.settings.filester_max_file_bytes,
                 base_name=local_path.stem,
+                skip_check=lambda: self._check_skip(job.id),
             ):
+                self._check_skip(job.id)
                 part_path = Path(part["path"])
                 self._progress_bytes = 0
                 self._progress_total = part["size_bytes"]

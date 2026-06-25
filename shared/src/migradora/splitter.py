@@ -4,12 +4,13 @@ from __future__ import annotations
 
 import logging
 import math
-from collections.abc import Iterator
+from collections.abc import Callable, Iterator
 from pathlib import Path
 
 logger = logging.getLogger("migradora.splitter")
 
 _CHUNK_SIZE = 8 * 1024 * 1024
+_SKIP_CHECK_EVERY_CHUNKS = 32
 
 
 def required_disk_bytes(file_size: int, part_size_bytes: int) -> int:
@@ -21,11 +22,20 @@ def required_disk_bytes(file_size: int, part_size_bytes: int) -> int:
     return file_size + part_size_bytes
 
 
-def _extract_part(source: Path, dest: Path, offset: int, size: int) -> None:
+def _extract_part(
+    source: Path,
+    dest: Path,
+    offset: int,
+    size: int,
+    skip_check: Callable[[], None] | None = None,
+) -> None:
     with source.open("rb") as src, dest.open("wb") as dst:
         src.seek(offset)
         remaining = size
+        chunks = 0
         while remaining > 0:
+            if skip_check and chunks % _SKIP_CHECK_EVERY_CHUNKS == 0:
+                skip_check()
             chunk = src.read(min(_CHUNK_SIZE, remaining))
             if not chunk:
                 raise RuntimeError(
@@ -33,6 +43,7 @@ def _extract_part(source: Path, dest: Path, offset: int, size: int) -> None:
                 )
             dst.write(chunk)
             remaining -= len(chunk)
+            chunks += 1
 
 
 def iter_upload_parts(
@@ -40,6 +51,7 @@ def iter_upload_parts(
     output_dir: str | Path,
     part_size_bytes: int,
     base_name: str | None = None,
+    skip_check: Callable[[], None] | None = None,
 ) -> Iterator[dict]:
     """
     Yield upload parts one at a time.
@@ -88,7 +100,7 @@ def iter_upload_parts(
             part_name,
             part_size,
         )
-        _extract_part(source, part_path, offset, part_size)
+        _extract_part(source, part_path, offset, part_size, skip_check=skip_check)
         yield {
             "path": str(part_path),
             "filename": part_name,

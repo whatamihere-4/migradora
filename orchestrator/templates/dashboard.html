@@ -90,6 +90,13 @@
       font-size: 0.85rem;
     }
     .job-header { display: flex; justify-content: space-between; gap: 0.75rem; align-items: flex-start; }
+    .job-actions { flex-shrink: 0; }
+    .btn.skip {
+      background: transparent; border: 1px solid var(--border); color: var(--muted);
+      padding: 0.35rem 0.65rem; font-size: 0.75rem;
+    }
+    .btn.skip:hover { border-color: var(--error); color: var(--error); }
+    .job-status.skipped { color: var(--muted); }
     .job-title { font-weight: 600; word-break: break-word; flex: 1; }
     .job-folder { font-size: 0.75rem; color: var(--accent); margin: 0.25rem 0; }
     .job-status { color: var(--muted); margin-top: 0.35rem; }
@@ -144,7 +151,7 @@
   </div>
 
   <script>
-    const FILTERS = ['all', 'pending', 'downloading', 'uploading', 'uploaded', 'failed'];
+    const FILTERS = ['all', 'pending', 'downloading', 'uploading', 'uploaded', 'failed', 'skipped'];
     let activeFilter = 'all';
     let refreshTimer = null;
 
@@ -193,6 +200,7 @@
         ['Active', (stats.downloading||0) + (stats.uploading||0), ''],
         ['Uploaded', stats.uploaded, 'ok'],
         ['Failed', stats.failed, stats.failed ? 'err' : ''],
+        ['Skipped', stats.skipped || 0, ''],
       ];
       document.getElementById('stats-grid').innerHTML = items.map(([l,v,c]) =>
         `<div class="stat ${c}"><div class="val">${v}</div><div class="lbl">${l}</div></div>`
@@ -201,6 +209,17 @@
       document.getElementById('overall-progress').style.width = pct + '%';
       document.getElementById('progress-detail').textContent =
         `${pct}% complete · ${fmtBytes(stats.uploaded_bytes)} / ${fmtBytes(stats.total_bytes)} uploaded`;
+    }
+
+    function canSkip(j) {
+      return j.status !== 'uploaded' && j.status !== 'skipped';
+    }
+
+    async function skipJob(id, filename) {
+      const label = filename ? `#${id} ${filename}` : `#${id}`;
+      if (!confirm(`Skip ${label}?\n\nLocal download files will be deleted. Parts already uploaded to Filester stay there.`)) return;
+      await post(`/jobs/${id}/skip`);
+      refresh();
     }
 
     function renderJobs(jobs, pipeline, currentJob) {
@@ -236,6 +255,9 @@
           progressHtml = `<div class="progress-wrap"><div class="progress-bar indeterminate"></div></div>
             <div class="meta" style="margin-top:0.25rem">Starting…</div>`;
         }
+        const skipBtn = canSkip(j)
+          ? `<div class="job-actions"><button class="btn skip" data-skip-id="${j.id}" data-skip-name="${esc(j.filename)}">Skip</button></div>`
+          : '';
         return `<div class="job">
           <div class="job-header">
             <div>
@@ -245,6 +267,7 @@
               ${j.last_error ? `<div class="job-error">${esc(j.last_error)}</div>` : ''}
               ${links ? `<div class="job-links">${links}</div>` : ''}
             </div>
+            ${skipBtn}
           </div>
           ${progressHtml}
         </div>`;
@@ -290,6 +313,12 @@
       btn.disabled = true;
       try { await post('/discover'); } finally { btn.disabled = false; refresh(); }
     };
+
+    document.getElementById('jobs-list').addEventListener('click', (e) => {
+      const btn = e.target.closest('[data-skip-id]');
+      if (!btn) return;
+      skipJob(btn.dataset.skipId, btn.dataset.skipName).catch(err => alert(err.message));
+    });
 
     renderFilters();
     refresh();
