@@ -78,11 +78,21 @@ def ensure_filester_folder_path(
 
         mapping = queue.get_folder_mapping_record(accumulated)
         if mapping and not _is_flat_fallback_name(mapping[1]):
-            cached = CachedFolder(identifier=mapping[0])
-            cache[accumulated] = cached
-            parent_identifier = cached.identifier
-            last_identifier = cached.identifier
-            continue
+            if parent_identifier and not client.folder_is_under_parent(
+                mapping[0], parent_identifier=parent_identifier
+            ):
+                logger.warning(
+                    "Ignoring stale folder mapping for %r -> %s (not under %s)",
+                    accumulated,
+                    mapping[0],
+                    parent_identifier,
+                )
+            else:
+                cached = CachedFolder(identifier=mapping[0])
+                cache[accumulated] = cached
+                parent_identifier = cached.identifier
+                last_identifier = cached.identifier
+                continue
 
         is_root_segment = (
             segment == settings.filester_root_folder_name.strip()
@@ -121,6 +131,8 @@ def ensure_filester_folder_path(
                 parent_identifier=parent_identifier,
             )
         except RuntimeError as exc:
+            if parent_identifier and "top-level" in str(exc).lower():
+                raise
             if parent_identifier and "409" in str(exc):
                 root_dup = client.find_folder(segment)
                 if root_dup:

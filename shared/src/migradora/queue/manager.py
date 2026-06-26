@@ -317,6 +317,7 @@ class QueueManager:
         with self.connection() as conn:
             files_deleted = conn.execute("DELETE FROM files").rowcount
             folders_deleted = conn.execute("DELETE FROM folders").rowcount
+            conn.execute("DELETE FROM sqlite_sequence WHERE name IN ('files', 'folders')")
             conn.execute(
                 """UPDATE queue_control SET state=?, pause_reason='', updated_at=?
                    WHERE id=1""",

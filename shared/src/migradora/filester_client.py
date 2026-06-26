@@ -296,6 +296,46 @@ class FilesterClient:
             )
         return matches[0]
 
+    def folder_is_under_parent(
+        self,
+        child_identifier: str,
+        *,
+        parent_identifier: str,
+    ) -> bool:
+        return any(
+            folder.identifier == child_identifier
+            for folder in self.list_child_folders(parent_identifier)
+        )
+
+    def assert_nested_folder(
+        self,
+        folder: FilesterFolder,
+        name: str,
+        *,
+        parent_identifier: str | None = None,
+        parent_db_id: int | None = None,
+    ) -> None:
+        """Raise if a folder intended to be nested is actually at account root."""
+        if not parent_identifier and parent_db_id is None:
+            return
+        if parent_identifier and self.folder_is_under_parent(
+            folder.identifier,
+            parent_identifier=parent_identifier,
+        ):
+            return
+        root = self.find_folder(name)
+        if root and root.identifier == folder.identifier:
+            parent = parent_identifier or str(parent_db_id)
+            raise RuntimeError(
+                f"Folder {name!r} exists at the Filester account root "
+                f"({folder.identifier}), not under {parent}. "
+                f"Delete the top-level {name!r} folder on Filester and retry."
+            )
+        raise RuntimeError(
+            f"Folder {name!r} ({folder.identifier}) is not nested under "
+            f"{parent_identifier or parent_db_id}"
+        )
+
     @staticmethod
     def _identifier_from_error(exc: httpx.HTTPStatusError) -> str | None:
         try:
@@ -326,6 +366,13 @@ class FilesterClient:
             parent_identifier=parent_identifier,
         )
         if existing:
+            if parent_identifier or parent_db_id is not None:
+                self.assert_nested_folder(
+                    existing,
+                    name,
+                    parent_identifier=parent_identifier,
+                    parent_db_id=parent_db_id,
+                )
             logger.info(
                 "Reusing Filester folder %r -> %s (parent=%s)",
                 name,
@@ -356,6 +403,18 @@ class FilesterClient:
                         conflict.identifier,
                     )
                     return conflict
+                if parent_identifier or parent_db_id is not None:
+                    root_dup = self.find_folder(name)
+                    if root_dup:
+                        parent = parent_identifier or str(parent_db_id)
+                        raise RuntimeError(
+                            f"Cannot create nested folder {name!r} under {parent}: "
+                            f"a top-level folder with that name already exists "
+                            f"({root_dup.identifier}). Delete it on Filester and retry."
+                        ) from exc
+                    raise RuntimeError(
+                        f"Cannot create nested folder {name!r}: {exc}"
+                    ) from exc
                 conflict_id = self._identifier_from_error(exc)
                 if conflict_id:
                     return self.resolve_folder(conflict_id, name)
@@ -363,6 +422,13 @@ class FilesterClient:
 
         folder = self._parse_folder_from_create(data)
         if folder:
+            if parent_identifier or parent_db_id is not None:
+                self.assert_nested_folder(
+                    folder,
+                    name,
+                    parent_identifier=parent_identifier,
+                    parent_db_id=parent_db_id,
+                )
             if self._folder_index is not None:
                 self._folder_index.add(folder)
             logger.info(

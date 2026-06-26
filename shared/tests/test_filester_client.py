@@ -71,6 +71,44 @@ class CreateFolderConflictTests(unittest.TestCase):
                 folder = self.client.create_folder("CzechVR")
         self.assertEqual(folder.identifier, "czech-id")
 
+    def test_nested_create_409_raises_when_root_duplicate(self) -> None:
+        root = FilesterFolder(identifier="root-czech", name="CzechVR")
+        conflict = httpx.Response(
+            409,
+            request=httpx.Request("POST", "https://u1.filester.me/api/v1/folder"),
+            json={
+                "success": False,
+                "message": "DUPLICATE_NAME",
+                "data": {"identifier": "root-czech"},
+            },
+        )
+
+        def find_side_effect(name: str, **kwargs: object) -> FilesterFolder | None:
+            if kwargs.get("parent_identifier"):
+                return None
+            if name == "CzechVR":
+                return root
+            return None
+
+        with patch.object(self.client, "find_folder", side_effect=find_side_effect):
+            with patch.object(self.client, "_post_folder", side_effect=httpx.HTTPStatusError(
+                "conflict", request=conflict.request, response=conflict
+            )):
+                with self.assertRaises(RuntimeError) as ctx:
+                    self.client.create_folder("CzechVR", parent_identifier="vr-id")
+        self.assertIn("top-level", str(ctx.exception).lower())
+
+    def test_assert_nested_folder_rejects_root_match(self) -> None:
+        root = FilesterFolder(identifier="root-id", name="CzechVR")
+        with patch.object(self.client, "list_child_folders", return_value=[]):
+            with patch.object(self.client, "find_folder", return_value=root):
+                with self.assertRaises(RuntimeError):
+                    self.client.assert_nested_folder(
+                        root,
+                        "CzechVR",
+                        parent_identifier="vr-id",
+                    )
+
     def test_parse_create_response_nested_folder(self) -> None:
         folder = FilesterClient._parse_folder_from_create({
             "success": True,
