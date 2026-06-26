@@ -7,6 +7,7 @@ from dataclasses import dataclass
 
 from migradora.config import Settings
 from migradora.filester_client import FilesterClient
+from migradora.filester_folders_file import resolve_folder_id
 from migradora.queue.manager import QueueManager
 
 logger = logging.getLogger("migradora.filester_folders")
@@ -33,6 +34,35 @@ def _is_flat_fallback_name(folder_name: str) -> bool:
     return " / " in folder_name
 
 
+def _mapped_folder_id(settings: Settings, accumulated: str) -> str | None:
+    """Look up a Filester folder id from ``filester-folders.json`` (apu-style ``{id: name}``)."""
+    key = accumulated.strip().strip("/")
+    if not key or not settings.filester_folders:
+        return None
+    folders = settings.filester_folders
+    for label in (key.rsplit("/", 1)[-1], key):
+        folder_id = resolve_folder_id(folders, label)
+        if folder_id:
+            return folder_id
+    return None
+
+
+def _apply_folder_id(
+    *,
+    accumulated: str,
+    segment: str,
+    folder_id: str,
+    cache: dict[str, CachedFolder],
+    queue: QueueManager,
+    source: str,
+) -> CachedFolder:
+    cached = CachedFolder(identifier=folder_id)
+    cache[accumulated] = cached
+    queue.save_folder_mapping(accumulated, folder_id, segment)
+    logger.info("Using %s folder %r -> %s", source, accumulated, folder_id)
+    return cached
+
+
 def _seed_root_folder(
     settings: Settings,
     cache: dict[str, CachedFolder],
@@ -53,8 +83,9 @@ def ensure_filester_folder_path(
     """
     Mirror a Gofile path like ``VR/CzechVR`` as nested Filester folders.
 
-    Requires ``FILESTER_ROOT_FOLDER_NAME=VR`` (and optionally ``FILESTER_ROOT_FOLDER_ID``).
-    Studio folders are created *inside* VR via ``parent_id`` on ``/api/v1/folder``.
+    Set ``FILESTER_FOLDERS_FILE`` to a JSON map of ``{folder_id: name}`` (same as
+    apu ``folders.json``). Set ``FILESTER_AUTO_CREATE_FOLDERS=false`` to disable
+    API folder creation entirely.
     """
     _seed_root_folder(settings, cache)
     path = _full_path(settings, gofile_folder_path)
@@ -74,6 +105,20 @@ def ensure_filester_folder_path(
         if accumulated in cache:
             parent_identifier = cache[accumulated].identifier
             last_identifier = parent_identifier
+            continue
+
+        mapped_id = _mapped_folder_id(settings, accumulated)
+        if mapped_id:
+            cached = _apply_folder_id(
+                accumulated=accumulated,
+                segment=segment,
+                folder_id=mapped_id,
+                cache=cache,
+                queue=queue,
+                source="mapped",
+            )
+            parent_identifier = cached.identifier
+            last_identifier = cached.identifier
             continue
 
         mapping = queue.get_folder_mapping_record(accumulated)
@@ -106,6 +151,13 @@ def ensure_filester_folder_path(
             parent_identifier = folder_id
             last_identifier = folder_id
             continue
+
+        if not settings.filester_auto_create_folders:
+            raise RuntimeError(
+                f"No Filester folder mapping for gofile path {accumulated!r}. "
+                f"Add it to {settings.filester_folders_file or 'filester-folders.json'}, "
+                f"or set FILESTER_AUTO_CREATE_FOLDERS=true."
+            )
 
         existing = client.find_folder(
             segment,

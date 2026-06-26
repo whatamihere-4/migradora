@@ -8,6 +8,8 @@ from pathlib import Path
 
 from dotenv import load_dotenv
 
+from migradora.filester_folders_file import load_filester_folders
+
 
 def _env(key: str, default: str = "") -> str:
     return os.getenv(key, default).strip()
@@ -53,6 +55,9 @@ class Settings:
     filester_api_base: str = "https://u1.filester.me"
     filester_root_folder_name: str = ""
     filester_root_folder_id: str = ""
+    filester_folders_file: str = ""
+    filester_folders: dict[str, str] = field(default_factory=dict)
+    filester_auto_create_folders: bool = True
     filester_max_file_bytes: int = 10_200_547_328  # 9.5 GiB
 
     # Paths
@@ -102,6 +107,10 @@ class Settings:
                 load_dotenv(override=True)
 
         state_dir = _env("STATE_DIR", "/data/state")
+        folders_file = _env(
+            "FILESTER_FOLDERS_FILE",
+            f"{state_dir}/filester-folders.json",
+        )
         return cls(
             gofile_folder_urls=_env_list("GOFILE_FOLDER_URLS"),
             gofile_token=_env("GOFILE_TOKEN"),
@@ -110,6 +119,9 @@ class Settings:
             filester_api_base=_env("FILESTER_API_BASE", "https://u1.filester.me").rstrip("/"),
             filester_root_folder_name=_env("FILESTER_ROOT_FOLDER_NAME"),
             filester_root_folder_id=_env("FILESTER_ROOT_FOLDER_ID"),
+            filester_folders_file=folders_file,
+            filester_folders=load_filester_folders(folders_file),
+            filester_auto_create_folders=_env_bool("FILESTER_AUTO_CREATE_FOLDERS", True),
             filester_max_file_bytes=_env_int("FILESTER_MAX_FILE_BYTES", 10_200_547_328),
             download_dir=_env("DOWNLOAD_DIR", "/data/downloads"),
             state_dir=state_dir,
