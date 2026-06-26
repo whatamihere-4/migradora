@@ -168,6 +168,30 @@
       return n + ' B';
     }
 
+    function fmtSpeed(bps) {
+      bps = Number(bps) || 0;
+      if (!bps) return '—';
+      if (bps >= 1e9) return (bps/1e9).toFixed(2) + ' GB/s';
+      if (bps >= 1e6) return (bps/1e6).toFixed(1) + ' MB/s';
+      if (bps >= 1e3) return (bps/1e3).toFixed(0) + ' KB/s';
+      return Math.round(bps) + ' B/s';
+    }
+
+    function fmtEta(sec) {
+      if (sec == null || sec < 0 || !isFinite(sec)) return '—';
+      sec = Math.round(sec);
+      if (sec < 60) return sec + 's';
+      const m = Math.floor(sec / 60);
+      const s = sec % 60;
+      if (m < 60) return s ? `${m}m ${s}s` : `${m}m`;
+      const h = Math.floor(m / 60);
+      const rm = m % 60;
+      if (h < 24) return rm ? `${h}h ${rm}m` : `${h}h`;
+      const d = Math.floor(h / 24);
+      const rh = h % 24;
+      return rh ? `${d}d ${rh}h` : `${d}d`;
+    }
+
     async function api(path, opts) {
       const r = await fetch(path, opts);
       if (!r.ok) throw new Error(await r.text());
@@ -193,7 +217,7 @@
       });
     }
 
-    function renderStats(stats) {
+    function renderStats(stats, eta) {
       const items = [
         ['Total', stats.total, ''],
         ['Pending', stats.pending, stats.pending ? 'warn' : ''],
@@ -207,8 +231,14 @@
       ).join('');
       const pct = stats.completion_pct || 0;
       document.getElementById('overall-progress').style.width = pct + '%';
-      document.getElementById('progress-detail').textContent =
-        `${pct}% complete · ${fmtBytes(stats.uploaded_bytes)} / ${fmtBytes(stats.total_bytes)} uploaded`;
+      let detail = `${pct}% complete · ${fmtBytes(stats.uploaded_bytes)} / ${fmtBytes(stats.total_bytes)} uploaded`;
+      if (eta && eta.queue_label && eta.queue_label !== '—') {
+        detail += ` · ETA ${eta.queue_label}`;
+        if (eta.download_label !== '—' || eta.upload_label !== '—') {
+          detail += ` (↓${eta.download_label} · ↑${eta.upload_label})`;
+        }
+      }
+      document.getElementById('progress-detail').textContent = detail;
     }
 
     function canSkip(j) {
@@ -222,7 +252,7 @@
       refresh();
     }
 
-    function renderJobs(jobs, pipeline, currentJob) {
+    function renderJobs(jobs, pipeline, currentJob, eta) {
       const list = document.getElementById('jobs-list');
       let filtered = activeFilter === 'all' ? jobs : jobs.filter(j => j.status === activeFilter);
       if (currentJob && activeFilter !== 'all' && currentJob.status === activeFilter
@@ -238,6 +268,8 @@
       const phase = pipeline && pipeline.phase;
       const progBytes = pipeline && pipeline.progress_bytes || 0;
       const progTotal = pipeline && pipeline.progress_total || 0;
+      const phaseEta = eta && eta.phase_label;
+      const phaseSpeed = pipeline && pipeline.speed_bps;
       list.innerHTML = sorted.map(j => {
         const isCurrent = currentId === j.id;
         const isActive = isCurrent && (phase === 'downloading' || phase === 'uploading');
@@ -249,8 +281,11 @@
         let progressHtml = '';
         if (isActive && progTotal > 0) {
           const pct = Math.min(100, Math.round((progBytes / progTotal) * 100));
+          const etaLine = phaseEta && phaseEta !== '—'
+            ? ` · ETA ${phaseEta} · ${fmtSpeed(phaseSpeed)}`
+            : '';
           progressHtml = `<div class="progress-wrap"><div class="progress-bar" style="width:${pct}%"></div></div>
-            <div class="meta" style="margin-top:0.25rem">${pct}% · ${fmtBytes(progBytes)} / ${fmtBytes(progTotal)}</div>`;
+            <div class="meta" style="margin-top:0.25rem">${pct}% · ${fmtBytes(progBytes)} / ${fmtBytes(progTotal)}${etaLine}</div>`;
         } else if (isActive) {
           progressHtml = `<div class="progress-wrap"><div class="progress-bar indeterminate"></div></div>
             <div class="meta" style="margin-top:0.25rem">Starting…</div>`;
@@ -281,7 +316,8 @@
           api('/jobs?limit=500'),
         ]);
         const st = status.stats || {};
-        renderStats(st);
+        const eta = status.eta || {};
+        renderStats(st, eta);
         const qs = status.queue_state || 'unknown';
         const pill = document.getElementById('queue-pill');
         pill.textContent = qs;
@@ -295,8 +331,24 @@
         const progLabel = p.progress_total > 0 && p.phase !== 'idle'
           ? `<br>${Math.round((p.progress_bytes / p.progress_total) * 100)}% · ${fmtBytes(p.progress_bytes)} / ${fmtBytes(p.progress_total)}`
           : '';
-        document.getElementById('pipeline-meta').innerHTML = phaseLabel + progLabel;
-        renderJobs(jobsResp.jobs || [], p, status.current_job);
+        const speedLabel = p.speed_bps && p.phase !== 'idle'
+          ? `<br>${fmtSpeed(p.speed_bps)}`
+          : '';
+        const etaLabel = eta.phase_label && eta.phase_label !== '—' && p.phase !== 'idle'
+          ? ` · ETA ${eta.phase_label}`
+          : '';
+        const queueEtaLabel = eta.queue_label && eta.queue_label !== '—'
+          ? `<br><strong>Queue ETA:</strong> ${esc(eta.queue_label)}`
+          + (eta.download_label !== '—' || eta.upload_label !== '—'
+            ? ` (download ${esc(eta.download_label)}, upload ${esc(eta.upload_label)})`
+            : '')
+          : '';
+        const avgSpeedLabel = (eta.avg_download_bps || eta.avg_upload_bps)
+          ? `<br>Avg ↓${fmtSpeed(eta.avg_download_bps)} · ↑${fmtSpeed(eta.avg_upload_bps)}`
+          : '';
+        document.getElementById('pipeline-meta').innerHTML =
+          phaseLabel + progLabel + speedLabel + etaLabel + queueEtaLabel + avgSpeedLabel;
+        renderJobs(jobsResp.jobs || [], p, status.current_job, eta);
         const active = (st.downloading||0) + (st.uploading||0);
         scheduleRefresh(active > 0 ? 1500 : 4000);
       } catch (e) {

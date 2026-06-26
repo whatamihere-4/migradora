@@ -11,6 +11,11 @@ from fastapi.responses import HTMLResponse
 
 from migradora.config import Settings
 from migradora.queue.manager import QueueManager
+from migradora.transfer_stats import (
+    compute_queue_eta,
+    compute_remaining_bytes,
+    format_eta,
+)
 
 if TYPE_CHECKING:
     from migradora.orchestrator import Orchestrator
@@ -81,6 +86,7 @@ def create_app(settings: Settings, orchestrator: Orchestrator) -> FastAPI:
         filester_stats = orchestrator.filester_monitor.fetch_storage_stats()
         pipeline = orchestrator.pipeline.status
         current_job = None
+        current_job_size = 0
         job_id = pipeline.get("current_job_id")
         phase = pipeline.get("phase")
         if job_id and phase in ("downloading", "uploading"):
@@ -88,11 +94,43 @@ def create_app(settings: Settings, orchestrator: Orchestrator) -> FastAPI:
             if record:
                 current_job = _job_payload(record)
                 current_job["status"] = phase
+                current_job_size = record.size_bytes or 0
+
+        incomplete_bytes = queue.get_incomplete_bytes_total()
+        remaining = compute_remaining_bytes(
+            incomplete_bytes=incomplete_bytes,
+            current_job_id=job_id,
+            current_job_size=current_job_size,
+            phase=phase or "",
+            progress_bytes=int(pipeline.get("progress_bytes") or 0),
+            upload_bytes_done=int(pipeline.get("upload_bytes_done") or 0),
+            upload_bytes_total=int(pipeline.get("upload_bytes_total") or 0),
+        )
+        queue_eta = compute_queue_eta(
+            remaining,
+            pipeline.get("avg_download_bps"),
+            pipeline.get("avg_upload_bps"),
+        )
+
         return {
             "queue_state": state.value,
             "pause_reason": pause_reason,
             "pipeline": pipeline,
             "current_job": current_job,
+            "eta": {
+                "queue_sec": queue_eta["queue_sec"],
+                "queue_label": format_eta(queue_eta["queue_sec"]),
+                "download_sec": queue_eta["download_sec"],
+                "download_label": format_eta(queue_eta["download_sec"]),
+                "upload_sec": queue_eta["upload_sec"],
+                "upload_label": format_eta(queue_eta["upload_sec"]),
+                "phase_sec": pipeline.get("phase_eta_sec"),
+                "phase_label": format_eta(pipeline.get("phase_eta_sec")),
+                "remaining_download_bytes": remaining.download_bytes,
+                "remaining_upload_bytes": remaining.upload_bytes,
+                "avg_download_bps": pipeline.get("avg_download_bps"),
+                "avg_upload_bps": pipeline.get("avg_upload_bps"),
+            },
             "stats": {
                 "total": stats.total,
                 "pending": stats.pending,

@@ -6,7 +6,7 @@ import logging
 import time
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any
+from typing import Any, Callable
 
 import httpx
 
@@ -458,7 +458,13 @@ class FilesterClient:
             return FilesterFolder(identifier=identifier, name=folder_name or identifier)
         return FilesterClient._parse_folder(block)
 
-    def upload_file(self, file_path: str | Path, folder_id: str | None = None) -> dict[str, Any]:
+    def upload_file(
+        self,
+        file_path: str | Path,
+        folder_id: str | None = None,
+        *,
+        on_progress: Callable[[int, int], None] | None = None,
+    ) -> dict[str, Any]:
         file_path = Path(file_path)
         if not file_path.exists():
             raise FileNotFoundError(str(file_path))
@@ -467,9 +473,14 @@ class FilesterClient:
         if folder_id:
             headers["X-Folder-ID"] = folder_id
 
+        total_size = file_path.stat().st_size
+
         for attempt in range(self.max_retries + 1):
             try:
-                with open(file_path, "rb") as fh:
+                with open(file_path, "rb") as raw_fh:
+                    fh: Any = raw_fh
+                    if on_progress:
+                        fh = _ProgressReader(raw_fh, total_size, on_progress)
                     files = {"file": (file_path.name, fh, "application/octet-stream")}
                     resp = self._client.post("/api/v1/upload", files=files, headers=headers)
                 if resp.status_code == 429:
@@ -503,3 +514,34 @@ class FilesterClient:
         except Exception as exc:
             logger.error("Verify failed for %s: %s", slug, exc)
             return False
+
+
+class _ProgressReader:
+    """File-like wrapper that reports bytes read during upload."""
+
+    def __init__(
+        self,
+        file_obj: Any,
+        total_size: int,
+        on_progress: Callable[[int, int], None],
+    ) -> None:
+        self._file_obj = file_obj
+        self._total_size = total_size
+        self._on_progress = on_progress
+        self._done = 0
+
+    def read(self, size: int = -1) -> bytes:
+        chunk = self._file_obj.read(size)
+        if chunk:
+            self._done += len(chunk)
+            self._on_progress(self._done, self._total_size)
+        return chunk
+
+    def __iter__(self):
+        return self
+
+    def __next__(self) -> bytes:
+        chunk = self.read(65536)
+        if not chunk:
+            raise StopIteration
+        return chunk

@@ -352,6 +352,16 @@ class QueueManager:
             stats.total_bytes = total_bytes["b"] if total_bytes else 0
             return stats
 
+    def get_incomplete_bytes_total(self) -> int:
+        """Sum of ``size_bytes`` for jobs not yet uploaded or skipped."""
+        with self.connection() as conn:
+            row = conn.execute(
+                """SELECT COALESCE(SUM(size_bytes), 0) AS total FROM files
+                   WHERE is_part = 0 AND status NOT IN (?, ?)""",
+                (FileStatus.UPLOADED.value, FileStatus.SKIPPED.value),
+            ).fetchone()
+            return int(row["total"]) if row else 0
+
     def list_files(self, status: str | None = None, limit: int = 100) -> list[FileRecord]:
         with self.connection() as conn:
             if status:

@@ -15,6 +15,7 @@ from migradora.models import FileStatus, QueueState
 from migradora.queue.manager import QueueManager
 from migradora.splitter import iter_upload_parts
 from migradora.size_limits import oversize_skip_reason, required_disk_gb
+from migradora.transfer_stats import TransferTracker, eta_seconds
 from migradora.utils import free_disk_gb
 
 from migradora.filester_folders import CachedFolder, ensure_filester_folder_path
@@ -60,17 +61,41 @@ class PipelineCoordinator:
         self._folder_cache: dict[str, CachedFolder] = {}
         self._progress_bytes: int = 0
         self._progress_total: int = 0
+        self._upload_bytes_done: int = 0
+        self._upload_bytes_total: int = 0
         self._last_touch_at: float = 0.0
         self._skip_job_id: int | None = None
+        self._transfer = TransferTracker()
 
     @property
     def status(self) -> dict:
+        phase = self._current_phase
+        speed_bps: float | None = None
+        phase_eta_sec: float | None = None
+        if phase == "downloading":
+            speed_bps = self._transfer.download_bps
+            phase_eta_sec = eta_seconds(
+                max(0, self._progress_total - self._progress_bytes),
+                speed_bps,
+            )
+        elif phase == "uploading":
+            speed_bps = self._transfer.upload_bps
+            phase_eta_sec = eta_seconds(
+                max(0, self._upload_bytes_total - self._upload_bytes_done),
+                speed_bps,
+            )
         return {
             "current_job_id": self._current_job_id,
             "current_job_name": self._current_job_name,
-            "phase": self._current_phase,
+            "phase": phase,
             "progress_bytes": self._progress_bytes,
             "progress_total": self._progress_total,
+            "upload_bytes_done": self._upload_bytes_done,
+            "upload_bytes_total": self._upload_bytes_total,
+            "speed_bps": speed_bps,
+            "phase_eta_sec": phase_eta_sec,
+            "avg_download_bps": self._transfer.download_bps,
+            "avg_upload_bps": self._transfer.upload_bps,
         }
 
     def stop(self) -> None:
@@ -94,6 +119,8 @@ class PipelineCoordinator:
         self._current_job_name = ""
         self._progress_bytes = 0
         self._progress_total = 0
+        self._upload_bytes_done = 0
+        self._upload_bytes_total = 0
         logger.info("Job %d skipped; local files removed", job_id)
 
     def run_loop(self) -> None:
@@ -183,7 +210,10 @@ class PipelineCoordinator:
         self._current_phase = "downloading"
         self._progress_bytes = 0
         self._progress_total = job.size_bytes or 0
+        self._upload_bytes_done = 0
+        self._upload_bytes_total = 0
         self._last_touch_at = 0.0
+        self._transfer.begin_phase("download")
         self.queue.update_file(job.id, status=FileStatus.DOWNLOADING)
 
         def on_download_progress(done: int, total: int | None) -> None:
@@ -191,6 +221,7 @@ class PipelineCoordinator:
             self._progress_bytes = done
             if total:
                 self._progress_total = total
+            self._transfer.update_progress("download", done)
             now = time.time()
             if now - self._last_touch_at >= 30:
                 self._last_touch_at = now
@@ -224,10 +255,14 @@ class PipelineCoordinator:
             status=FileStatus.DOWNLOADED,
             local_path=str(local_path),
         )
+        self._transfer.complete_phase("download", actual_size)
 
         self._current_phase = "uploading"
         self._progress_bytes = 0
-        self._progress_total = local_path.stat().st_size
+        self._progress_total = actual_size
+        self._upload_bytes_done = 0
+        self._upload_bytes_total = actual_size
+        self._transfer.begin_phase("upload")
         self.queue.update_file(job.id, status=FileStatus.UPLOADING)
 
         slugs: list[str] = []
@@ -259,18 +294,36 @@ class PipelineCoordinator:
             ):
                 self._check_skip(job.id)
                 part_path = Path(part["path"])
+                part_size = part["size_bytes"]
+                part_base_done = self._upload_bytes_done
                 self._progress_bytes = 0
-                self._progress_total = part["size_bytes"]
-                logger.info("Uploading %s (%d bytes)", part["filename"], part["size_bytes"])
-                result = filester.upload_file(part_path, folder_id=folder_id)
+                self._progress_total = part_size
+                logger.info("Uploading %s (%d bytes)", part["filename"], part_size)
+
+                def on_upload_progress(done: int, total: int) -> None:
+                    self._check_skip(job.id)
+                    self._progress_bytes = done
+                    self._progress_total = total
+                    cumulative = part_base_done + done
+                    self._upload_bytes_done = cumulative
+                    self._transfer.update_progress("upload", cumulative)
+
+                result = filester.upload_file(
+                    part_path,
+                    folder_id=folder_id,
+                    on_progress=on_upload_progress,
+                )
                 slug = result.get("slug", "")
                 if not slug:
                     raise RuntimeError(f"Upload returned no slug: {result}")
-                if not filester.verify_upload(slug, part["size_bytes"]):
+                if not filester.verify_upload(slug, part_size):
                     raise RuntimeError(f"Upload verification failed: {slug}")
                 slugs.append(slug)
+                self._upload_bytes_done = part_base_done + part_size
                 cleanup_dir(part_path)
                 logger.info("Uploaded -> https://filester.me/d/%s", slug)
+
+        self._transfer.complete_phase("upload", self._upload_bytes_total)
 
         cleanup_dir(job_dir)
         self.queue.update_file(
@@ -284,4 +337,6 @@ class PipelineCoordinator:
         self._current_job_name = ""
         self._progress_bytes = 0
         self._progress_total = 0
+        self._upload_bytes_done = 0
+        self._upload_bytes_total = 0
         logger.info("Job %d complete: %s", job.id, job.filename)
