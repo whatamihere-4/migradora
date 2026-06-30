@@ -31,7 +31,7 @@ For a tree like `VR/Studio1/...`, share the **VR** folder only — discovery wal
 GOFILE_FOLDER_URLS=https://gofile.io/d/YOUR_VR_FOLDER_ID
 ```
 
-Filester folders mirror the Gofile path (`VR` → `Studio1` → files). Large files upload as `.part001`, `.part002`, etc.
+Filester folders mirror the Gofile path (`VR` → `Studio1` → files). Split uploads go into a subfolder named after the video file.
 
 ### 3. Start
 
@@ -101,6 +101,8 @@ Files over `FILESTER_MAX_FILE_BYTES` (~9.5 GiB) are split before upload. Set `FI
 | `ffmpeg_slice` | `movie.PART1.mp4`, … (playable) | source + one part | `ffmpeg -f concat -safe 0 -i list.txt -c copy movie.mp4` |
 
 `ffmpeg_slice` uses more CPU but keeps the same low disk footprint as `bytes` — useful on small VPS disks when you want independently playable parts.
+
+Split uploads are placed in a Filester subfolder under the studio folder, named after the original video filename (e.g. `VR/Studio1/My Scene.mp4/` containing `My Scene.mp4.part001`, … or `My Scene.PART1.mp4`, …).
 
 ## Resuming after restart
 

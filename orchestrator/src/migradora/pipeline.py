@@ -18,7 +18,11 @@ from migradora.size_limits import oversize_skip_reason, required_disk_gb
 from migradora.transfer_stats import TransferTracker, eta_seconds
 from migradora.utils import free_disk_gb
 
-from migradora.filester_folders import CachedFolder, ensure_filester_folder_path
+from migradora.filester_folders import (
+    CachedFolder,
+    ensure_filester_folder_path,
+    ensure_split_parts_folder,
+)
 from migradora.job_cleanup import cleanup_job_files
 
 logger = logging.getLogger("migradora.pipeline")
@@ -279,11 +283,20 @@ class PipelineCoordinator:
                 _job_upload_folder_path(job),
                 self._folder_cache,
             )
+            needs_split = actual_size > self.settings.filester_max_file_bytes
+            upload_folder_id = folder_id
+            if needs_split:
+                upload_folder_id = ensure_split_parts_folder(
+                    filester,
+                    folder_id,
+                    job.filename,
+                )
             logger.info(
-                "Job %d uploading to Filester folder %s (gofile path %r)",
+                "Job %d uploading to Filester folder %s (gofile path %r%s)",
                 job.id,
-                folder_id,
+                upload_folder_id,
                 _job_upload_folder_path(job) or job.gofile_path,
+                f", split subfolder of {folder_id}" if needs_split else "",
             )
             for part in iter_upload_parts(
                 local_path,
@@ -314,7 +327,7 @@ class PipelineCoordinator:
 
                 result = filester.upload_file(
                     part_path,
-                    folder_id=folder_id,
+                    folder_id=upload_folder_id,
                     on_progress=on_upload_progress,
                 )
                 slug = result.get("slug", "")

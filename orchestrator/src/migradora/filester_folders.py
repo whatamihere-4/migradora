@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import logging
+import re
 from dataclasses import dataclass
 
 from migradora.config import Settings
@@ -12,10 +13,44 @@ from migradora.queue.manager import QueueManager
 
 logger = logging.getLogger("migradora.filester_folders")
 
+_FOLDER_NAME_MAX = 100
+
 
 @dataclass
 class CachedFolder:
     identifier: str
+
+
+def sanitize_folder_name(name: str, *, max_len: int = _FOLDER_NAME_MAX) -> str:
+    """Filester folder name: strip unsafe chars, collapse whitespace, cap length."""
+    s = re.sub(r'[<>:"/\\|?*\x00-\x1f]', "", (name or "").strip())
+    s = re.sub(r"\s+", " ", s).strip()
+    if not s:
+        s = "upload"
+    if len(s) > max_len:
+        s = s[:max_len].rstrip()
+    return s or "upload"
+
+
+def ensure_split_parts_folder(
+    client: FilesterClient,
+    parent_folder_id: str,
+    video_filename: str,
+) -> str:
+    """Create (or reuse) a subfolder named after the video for split part uploads."""
+    parent = (parent_folder_id or "").strip()
+    if not parent:
+        raise RuntimeError("Cannot create split-parts folder without a parent folder id")
+
+    title = sanitize_folder_name(video_filename)
+    folder = client.create_folder(title, parent_identifier=parent)
+    logger.info(
+        'Split parts will upload to subfolder %r -> %s (parent %s)',
+        title,
+        folder.identifier,
+        parent,
+    )
+    return folder.identifier
 
 
 def _full_path(settings: Settings, gofile_folder_path: str) -> str:
