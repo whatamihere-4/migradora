@@ -30,8 +30,8 @@ class EnsureSplitPartsFolderTests(unittest.TestCase):
         client.create_folder.return_value = FilesterFolder(
             identifier="split-folder",
             name="My Scene.mp4",
+            parent_identifier="studio-id",
         )
-        client.folder_is_under_parent.return_value = True
         folder_id = ensure_split_parts_folder(client, "studio-id", "My Scene.mp4")
         self.assertEqual(folder_id, "split-folder")
         client.create_folder.assert_called_once_with(
@@ -52,6 +52,7 @@ class OrganizeSplitPartsTests(unittest.TestCase):
         client.create_folder.return_value = FilesterFolder(
             identifier="split-folder",
             name="movie.mp4",
+            parent_identifier="studio-id",
         )
         client.folder_is_under_parent.return_value = True
         client.move_files.return_value = {"moved": 2, "failed": 0}

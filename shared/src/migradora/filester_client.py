@@ -21,6 +21,7 @@ class FilesterFolder:
     name: str
     db_id: int | None = None
     parent_db_id: int | None = None
+    parent_identifier: str | None = None
 
 
 class FolderIndex:
@@ -166,6 +167,20 @@ class FilesterClient:
         return data.get("data", data)
 
     @staticmethod
+    def _parse_parent_identifier(raw: dict[str, Any]) -> str | None:
+        parent = raw.get("parent")
+        if isinstance(parent, str):
+            value = parent.strip()
+            if value and value.lower() != "root":
+                return value
+        parent_id = raw.get("parent_id")
+        if isinstance(parent_id, str):
+            value = parent_id.strip()
+            if value and value.lower() != "root" and not value.isdigit():
+                return value
+        return None
+
+    @staticmethod
     def _parse_folder(raw: dict[str, Any]) -> FilesterFolder | None:
         name = (raw.get("name") or "").strip()
         if not name:
@@ -202,6 +217,7 @@ class FilesterClient:
             name=name,
             db_id=db_id,
             parent_db_id=parent_db_id,
+            parent_identifier=FilesterClient._parse_parent_identifier(raw),
         )
 
     def list_folders(self) -> list[dict[str, Any]]:
@@ -238,13 +254,21 @@ class FilesterClient:
         return FilesterFolder(identifier=identifier, name=name or "", db_id=None)
 
     def list_child_folders(self, parent_identifier: str) -> list[FilesterFolder]:
-        """List folders inside a parent. Tries several undocumented query styles."""
+        """List folders nested under ``parent_identifier``.
+
+        Filester's ``GET /api/v1/folder/{id}/folders`` currently returns a flat
+        account list without parent metadata. Rows are only kept when the API
+        includes a ``parent`` field matching ``parent_identifier``.
+        """
+        parent = (parent_identifier or "").strip()
+        if not parent:
+            return []
+
         folders: list[FilesterFolder] = []
         seen: set[str] = set()
         candidates = [
-            f"/api/v1/folder/{parent_identifier}/folders",
-            f"/api/v1/folders?parent={parent_identifier}",
-            f"/api/v1/folders?parent_id={parent_identifier}",
+            f"/api/v1/folders?parent={parent}",
+            f"/api/v1/folder/{parent}/folders",
         ]
         for path in candidates:
             try:
@@ -257,11 +281,56 @@ class FilesterClient:
             for raw in rows:
                 if not isinstance(raw, dict):
                     continue
+                row_parent = self._parse_parent_identifier(raw)
+                if row_parent != parent:
+                    continue
                 folder = self._parse_folder(raw)
                 if folder and folder.identifier not in seen:
                     folders.append(folder)
                     seen.add(folder.identifier)
         return folders
+
+    def _find_folder_under_parent(
+        self,
+        name: str,
+        parent_identifier: str,
+    ) -> FilesterFolder | None:
+        """Return a folder named ``name`` only when API reports the expected parent."""
+        parent = (parent_identifier or "").strip()
+        if not parent:
+            return None
+        matches = [
+            folder
+            for folder in self.list_child_folders(parent)
+            if folder.name == name
+        ]
+        if len(matches) == 1:
+            return matches[0]
+        return None
+
+    def get_folder_parent_identifier(self, folder_identifier: str) -> str | None:
+        """Best-effort parent lookup for a folder identifier."""
+        fid = (folder_identifier or "").strip()
+        if not fid:
+            return None
+        index = self.folder_index()
+        cached = index.by_identifier(fid)
+        if cached and cached.parent_identifier:
+            return cached.parent_identifier
+
+        for path in (f"/api/v1/folder/{fid}", f"/api/v1/folders/{fid}"):
+            try:
+                status, body, _text = self._raw_request("GET", path)
+            except httpx.HTTPError:
+                continue
+            if status != 200 or not body:
+                continue
+            data = body.get("data", body)
+            if isinstance(data, dict):
+                parent = self._parse_parent_identifier(data)
+                if parent:
+                    return parent
+        return None
 
     def find_folder(
         self,
@@ -271,15 +340,10 @@ class FilesterClient:
         parent_identifier: str | None = None,
     ) -> FilesterFolder | None:
         if parent_identifier:
-            for child in self.list_child_folders(parent_identifier):
-                if child.name == name:
-                    return child
-            index = self.folder_index()
-            return index.find_child(
-                name,
-                parent_db_id=parent_db_id,
-                parent_identifier=parent_identifier,
-            )
+            hit = self._find_folder_under_parent(name, parent_identifier)
+            if hit:
+                return hit
+            return None
 
         index = self.folder_index(refresh=parent_db_id is None)
         if parent_db_id is not None:
@@ -302,10 +366,14 @@ class FilesterClient:
         *,
         parent_identifier: str,
     ) -> bool:
-        return any(
-            folder.identifier == child_identifier
-            for folder in self.list_child_folders(parent_identifier)
-        )
+        parent = (parent_identifier or "").strip()
+        child = (child_identifier or "").strip()
+        if not parent or not child:
+            return False
+        actual_parent = self.get_folder_parent_identifier(child)
+        if actual_parent:
+            return actual_parent == parent
+        return False
 
     def assert_nested_folder(
         self,
@@ -318,11 +386,40 @@ class FilesterClient:
         """Raise if a folder intended to be nested is actually at account root."""
         if not parent_identifier and parent_db_id is None:
             return
-        if parent_identifier and self.folder_is_under_parent(
+
+        expected_parent = (parent_identifier or "").strip()
+        if folder.parent_identifier:
+            if folder.parent_identifier == expected_parent:
+                return
+            if folder.parent_identifier == "root" or not expected_parent:
+                pass
+            else:
+                raise RuntimeError(
+                    f"Folder {name!r} ({folder.identifier}) has parent "
+                    f"{folder.parent_identifier}, expected {expected_parent}"
+                )
+
+        if expected_parent and self.folder_is_under_parent(
             folder.identifier,
-            parent_identifier=parent_identifier,
+            parent_identifier=expected_parent,
         ):
             return
+
+        if expected_parent:
+            actual_parent = self.get_folder_parent_identifier(folder.identifier)
+            if actual_parent == expected_parent:
+                return
+            if actual_parent in (None, "root"):
+                raise RuntimeError(
+                    f"Folder {name!r} ({folder.identifier}) is at the Filester "
+                    f"account root, not under {expected_parent}. "
+                    f"Delete the top-level {name!r} folder on Filester and retry."
+                )
+            raise RuntimeError(
+                f"Folder {name!r} ({folder.identifier}) is under {actual_parent}, "
+                f"not {expected_parent}"
+            )
+
         root = self.find_folder(name)
         if root and root.identifier == folder.identifier:
             parent = parent_identifier or str(parent_db_id)
@@ -359,87 +456,112 @@ class FilesterClient:
         parent_db_id: int | None = None,
         parent_identifier: str | None = None,
         public: int = 1,
+        name_suffix: str | None = None,
     ) -> FilesterFolder:
-        existing = self.find_folder(
-            name,
-            parent_db_id=parent_db_id,
-            parent_identifier=parent_identifier,
-        )
-        if existing:
-            if parent_identifier or parent_db_id is not None:
-                self.assert_nested_folder(
-                    existing,
-                    name,
-                    parent_identifier=parent_identifier,
-                    parent_db_id=parent_db_id,
-                )
-            logger.info(
-                "Reusing Filester folder %r -> %s (parent=%s)",
-                name,
-                existing.identifier,
-                parent_identifier or "root",
-            )
-            return existing
+        folder_name = name[:100]
+        if name_suffix:
+            suffix = str(name_suffix).strip()
+            max_base = 100 - len(suffix) - 1
+            if max_base < 1:
+                folder_name = suffix[:100]
+            else:
+                folder_name = f"{folder_name[:max_base].rstrip()}-{suffix}"
 
-        payload: dict[str, object] = {"name": name[:100], "public": public}
+        nested_parent = (parent_identifier or "").strip()
+        if not nested_parent and parent_db_id is None:
+            existing = self.find_folder(folder_name)
+            if existing:
+                logger.info(
+                    "Reusing Filester folder %r -> %s (parent=root)",
+                    folder_name,
+                    existing.identifier,
+                )
+                return existing
+        elif nested_parent:
+            existing = self._find_folder_under_parent(folder_name, nested_parent)
+            if existing:
+                logger.info(
+                    "Reusing Filester folder %r -> %s (parent=%s)",
+                    folder_name,
+                    existing.identifier,
+                    nested_parent,
+                )
+                return existing
+
+        payload: dict[str, object] = {"name": folder_name, "public": public}
         if parent_db_id is not None:
             payload["parent"] = parent_db_id
-        elif parent_identifier:
-            payload["parent"] = parent_identifier
+        elif nested_parent:
+            payload["parent"] = nested_parent
 
         try:
             data = self._post_folder("/api/v1/folder", payload)
         except httpx.HTTPStatusError as exc:
             if exc.response.status_code == 409:
-                conflict = self.find_folder(
-                    name,
-                    parent_db_id=parent_db_id,
-                    parent_identifier=parent_identifier,
-                )
-                if conflict:
-                    logger.info(
-                        "Folder %r already exists -> %s (409)",
-                        name,
-                        conflict.identifier,
-                    )
-                    return conflict
-                if parent_identifier or parent_db_id is not None:
-                    root_dup = self.find_folder(name)
-                    if root_dup:
-                        parent = parent_identifier or str(parent_db_id)
-                        raise RuntimeError(
-                            f"Cannot create nested folder {name!r} under {parent}: "
-                            f"a top-level folder with that name already exists "
-                            f"({root_dup.identifier}). Delete it on Filester and retry."
-                        ) from exc
+                message = ""
+                try:
+                    body = exc.response.json()
+                    if isinstance(body, dict):
+                        message = str(body.get("message") or "")
+                except ValueError:
+                    message = ""
+                if nested_parent or parent_db_id is not None:
+                    if name_suffix is None and "exist" in message.lower():
+                        return self.create_folder(
+                            name,
+                            parent_db_id=parent_db_id,
+                            parent_identifier=parent_identifier,
+                            public=public,
+                            name_suffix="2",
+                        )
+                    conflict = self._find_folder_under_parent(
+                        folder_name,
+                        nested_parent,
+                    ) if nested_parent else None
+                    if conflict:
+                        logger.info(
+                            "Folder %r already exists -> %s (409)",
+                            folder_name,
+                            conflict.identifier,
+                        )
+                        return conflict
+                    if nested_parent:
+                        root_dup = self.find_folder(folder_name)
+                        if root_dup:
+                            raise RuntimeError(
+                                f"Cannot create nested folder {folder_name!r} under "
+                                f"{nested_parent}: a top-level folder with that name "
+                                f"already exists ({root_dup.identifier}). Delete it on "
+                                f"Filester and retry."
+                            ) from exc
                     raise RuntimeError(
-                        f"Cannot create nested folder {name!r}: {exc}"
+                        f"Cannot create nested folder {folder_name!r}: {exc}"
                     ) from exc
                 conflict_id = self._identifier_from_error(exc)
                 if conflict_id:
-                    return self.resolve_folder(conflict_id, name)
-            raise RuntimeError(f"Failed to create folder {name!r}: {exc}") from exc
+                    return self.resolve_folder(conflict_id, folder_name)
+            raise RuntimeError(f"Failed to create folder {folder_name!r}: {exc}") from exc
 
         folder = self._parse_folder_from_create(data)
         if folder:
-            if parent_identifier or parent_db_id is not None:
+            if nested_parent or parent_db_id is not None:
                 self.assert_nested_folder(
                     folder,
-                    name,
-                    parent_identifier=parent_identifier,
+                    folder_name,
+                    parent_identifier=nested_parent or None,
                     parent_db_id=parent_db_id,
                 )
             if self._folder_index is not None:
                 self._folder_index.add(folder)
             logger.info(
                 "Created Filester folder %r -> %s (parent=%s)",
-                name,
+                folder_name,
                 folder.identifier,
-                parent_identifier or parent_db_id or "root",
+                nested_parent or parent_db_id or "root",
             )
             return folder
 
-        raise RuntimeError(f"Failed to create folder {name!r}: {data}")
+        raise RuntimeError(f"Failed to create folder {folder_name!r}: {data}")
 
     @staticmethod
     def file_identifier_from_response(raw: dict[str, Any]) -> str:
@@ -507,7 +629,11 @@ class FilesterClient:
         if identifier:
             nested_name = nested.get("name") if isinstance(nested, dict) else ""
             folder_name = str(block.get("name") or nested_name or "")
-            return FilesterFolder(identifier=identifier, name=folder_name or identifier)
+            return FilesterFolder(
+                identifier=identifier,
+                name=folder_name or identifier,
+                parent_identifier=FilesterClient._parse_parent_identifier(block),
+            )
         return FilesterClient._parse_folder(block)
 
     def upload_file(

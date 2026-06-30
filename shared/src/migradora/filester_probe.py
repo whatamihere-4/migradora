@@ -204,8 +204,6 @@ def _probe_create_variants(
     if parent_identifier:
         variants.extend([
             ("nested str parent v1", "/api/v1/folder", {**base, "parent": parent_identifier}),
-            ("nested str parent_id v1", "/api/v1/folder", {**base, "parent_id": parent_identifier}),
-            ("parent_folder_id v1", "/api/v1/folder", {**base, "parent_folder_id": parent_identifier}),
         ])
     if nested_only and not variants:
         print("\n(nested-only: pass --parent-identifier)")
@@ -324,6 +322,7 @@ def run_probe_args(args: argparse.Namespace) -> int:
     print("  Docs: https://filester.me/api-docs")
     print("  Folders: GET /api/v1/folders, POST /api/v1/folder")
     print("  Nesting: POST /api/v1/folder with parent=<parent folder identifier>")
+    print("  Do NOT use parent_folder_id (creates at account root).")
     print("  Upload: POST /api/v1/upload with X-Folder-ID header")
     print("  Move parts: POST /api/v1/files/move {\"files\": [...], \"folder\": \"...\"}")
     print("  If 409 DUPLICATE_NAME: rename/delete conflicting folder first.")

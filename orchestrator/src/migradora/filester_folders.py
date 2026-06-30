@@ -44,10 +44,17 @@ def ensure_split_parts_folder(
 
     title = sanitize_folder_name(video_filename)
     folder = client.create_folder(title, parent_identifier=parent)
-    if not client.folder_is_under_parent(folder.identifier, parent_identifier=parent):
+    if folder.parent_identifier and folder.parent_identifier != parent:
+        raise RuntimeError(
+            f"Split subfolder {title!r} ({folder.identifier}) was created under "
+            f"{folder.parent_identifier}, not {parent}"
+        )
+    if not folder.parent_identifier and not client.folder_is_under_parent(
+        folder.identifier,
+        parent_identifier=parent,
+    ):
         logger.warning(
-            "Split subfolder %r (%s) could not be verified under parent %s; "
-            "continuing anyway",
+            "Split subfolder %r (%s) parent could not be verified under %s",
             title,
             folder.identifier,
             parent,

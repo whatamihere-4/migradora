@@ -109,21 +109,42 @@ class CreateFolderConflictTests(unittest.TestCase):
                         parent_identifier="vr-id",
                     )
 
-    def test_parse_create_response_nested_folder(self) -> None:
+    def test_parse_create_response_parent(self) -> None:
         folder = FilesterClient._parse_folder_from_create({
             "success": True,
             "data": {
-                "folder": {
-                    "id": "6a648cb787ef0f18",
-                    "name": "migradora-probe-test",
-                },
-                "identifier": "6a648cb787ef0f18",
+                "identifier": "8198067eaca26584",
+                "name": "migradora-nested-test",
+                "parent": "558b65a42fdad1f6",
             },
         })
         self.assertIsNotNone(folder)
         assert folder is not None
-        self.assertEqual(folder.identifier, "6a648cb787ef0f18")
-        self.assertEqual(folder.name, "migradora-probe-test")
+        self.assertEqual(folder.parent_identifier, "558b65a42fdad1f6")
+
+    def test_nested_create_does_not_reuse_root_folder(self) -> None:
+        root = FilesterFolder(identifier="root-id", name="CzechVR")
+        nested = FilesterFolder(
+            identifier="nested-id",
+            name="CzechVR",
+            parent_identifier="vr-id",
+        )
+        create_body = {
+            "success": True,
+            "data": {
+                "identifier": "nested-id",
+                "name": "CzechVR",
+                "parent": "vr-id",
+            },
+        }
+
+        with patch.object(self.client, "find_folder", return_value=root) as find_folder:
+            with patch.object(self.client, "_find_folder_under_parent", return_value=None):
+                with patch.object(self.client, "_post_folder", return_value=create_body):
+                    folder = self.client.create_folder("CzechVR", parent_identifier="vr-id")
+        self.assertEqual(folder.identifier, "nested-id")
+        self.assertEqual(folder.parent_identifier, "vr-id")
+        find_folder.assert_not_called()
 
     def test_parse_folder_keeps_hex_identifier_separate_from_db_id(self) -> None:
         folder = FilesterClient._parse_folder({
