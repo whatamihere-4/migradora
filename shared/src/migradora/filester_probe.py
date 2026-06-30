@@ -203,7 +203,8 @@ def _probe_create_variants(
         )
     if parent_identifier:
         variants.extend([
-            ("nested str parent v1", "/api/v1/folder", {**base, "parent_id": parent_identifier}),
+            ("nested str parent v1", "/api/v1/folder", {**base, "parent": parent_identifier}),
+            ("nested str parent_id v1", "/api/v1/folder", {**base, "parent_id": parent_identifier}),
             ("parent_folder_id v1", "/api/v1/folder", {**base, "parent_folder_id": parent_identifier}),
         ])
     if nested_only and not variants:
@@ -320,10 +321,12 @@ def run_probe_args(args: argparse.Namespace) -> int:
                 print(f"  ERROR: {exc}")
 
     print("\n== API notes ==")
-    print("  Documented: GET /api/v1/folders, POST /api/v1/folder, GET /api/v1/folder/{id}/files")
-    print("  No documented folder detail (GET /api/v1/folder/{id}) or move/reparent endpoints.")
-    print("  Nesting: POST /api/v1/folder with parent_id=<parent folder identifier>.")
-    print("  If 409 DUPLICATE_NAME: rename/delete root folder with that name first.")
+    print("  Docs: https://filester.me/api-docs")
+    print("  Folders: GET /api/v1/folders, POST /api/v1/folder")
+    print("  Nesting: POST /api/v1/folder with parent=<parent folder identifier>")
+    print("  Upload: POST /api/v1/upload with X-Folder-ID header")
+    print("  Move parts: POST /api/v1/files/move {\"files\": [...], \"folder\": \"...\"}")
+    print("  If 409 DUPLICATE_NAME: rename/delete conflicting folder first.")
     return 0
 
 

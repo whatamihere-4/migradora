@@ -383,9 +383,9 @@ class FilesterClient:
 
         payload: dict[str, object] = {"name": name[:100], "public": public}
         if parent_db_id is not None:
-            payload["parent_id"] = parent_db_id
+            payload["parent"] = parent_db_id
         elif parent_identifier:
-            payload["parent_id"] = parent_identifier
+            payload["parent"] = parent_identifier
 
         try:
             data = self._post_folder("/api/v1/folder", payload)
@@ -440,6 +440,58 @@ class FilesterClient:
             return folder
 
         raise RuntimeError(f"Failed to create folder {name!r}: {data}")
+
+    @staticmethod
+    def file_identifier_from_response(raw: dict[str, Any]) -> str:
+        """Return slug or file id from a Filester upload JSON body."""
+        slug = str(raw.get("slug") or "").strip()
+        if slug:
+            return slug
+        file_id = raw.get("file_id")
+        if file_id is not None and str(file_id).strip():
+            return str(file_id).strip()
+        data = raw.get("data")
+        if isinstance(data, dict):
+            slug = str(data.get("slug") or "").strip()
+            if slug:
+                return slug
+            fid = data.get("id")
+            if fid is not None and str(fid).strip():
+                return str(fid).strip()
+            uuid_val = str(data.get("uuid") or "").strip()
+            if uuid_val:
+                return uuid_val
+        return ""
+
+    def move_files(self, file_identifiers: list[str], folder_id: str) -> dict[str, Any]:
+        """Move files into ``folder_id`` via POST /api/v1/files/move (bulk)."""
+        ids = [str(item).strip() for item in file_identifiers if str(item).strip()]
+        if not ids:
+            raise ValueError("no file identifiers to move")
+        dest = (folder_id or "").strip()
+        if not dest:
+            raise ValueError("destination folder id required")
+
+        data = self._request(
+            "POST",
+            "/api/v1/files/move",
+            json={"files": ids, "folder": dest},
+        )
+        if data.get("success") is False:
+            raise RuntimeError(f"Filester move failed: {data}")
+        block = data.get("data")
+        return block if isinstance(block, dict) else data
+
+    def list_folder_files(self, folder_id: str) -> list[dict[str, Any]]:
+        """List files in a folder via GET /api/v1/folder/{identifier}/files."""
+        fid = (folder_id or "").strip()
+        if not fid:
+            return []
+        data = self._request("GET", f"/api/v1/folder/{fid}/files")
+        if data.get("success") is False:
+            return []
+        rows = data.get("data")
+        return rows if isinstance(rows, list) else []
 
     @staticmethod
     def _parse_folder_from_create(data: dict[str, Any]) -> FilesterFolder | None:

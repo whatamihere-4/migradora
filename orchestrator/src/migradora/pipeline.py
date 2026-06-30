@@ -21,7 +21,7 @@ from migradora.utils import free_disk_gb
 from migradora.filester_folders import (
     CachedFolder,
     ensure_filester_folder_path,
-    ensure_split_parts_folder,
+    organize_split_parts_into_folder,
 )
 from migradora.job_cleanup import cleanup_job_files
 
@@ -283,21 +283,14 @@ class PipelineCoordinator:
                 _job_upload_folder_path(job),
                 self._folder_cache,
             )
-            needs_split = actual_size > self.settings.filester_max_file_bytes
-            upload_folder_id = folder_id
-            if needs_split:
-                upload_folder_id = ensure_split_parts_folder(
-                    filester,
-                    folder_id,
-                    job.filename,
-                )
             logger.info(
-                "Job %d uploading to Filester folder %s (gofile path %r%s)",
+                "Job %d uploading to Filester folder %s (gofile path %r)",
                 job.id,
-                upload_folder_id,
+                folder_id,
                 _job_upload_folder_path(job) or job.gofile_path,
-                f", split subfolder of {folder_id}" if needs_split else "",
             )
+            was_split = False
+            upload_responses: list[dict] = []
             for part in iter_upload_parts(
                 local_path,
                 job_dir,
@@ -310,6 +303,8 @@ class PipelineCoordinator:
                 ffmpeg_timeout=self.settings.ffmpeg_timeout_sec,
             ):
                 self._check_skip(job.id)
+                if int(part.get("part_count") or 1) > 1:
+                    was_split = True
                 part_path = Path(part["path"])
                 part_size = part["size_bytes"]
                 part_base_done = self._upload_bytes_done
@@ -327,9 +322,10 @@ class PipelineCoordinator:
 
                 result = filester.upload_file(
                     part_path,
-                    folder_id=upload_folder_id,
+                    folder_id=folder_id,
                     on_progress=on_upload_progress,
                 )
+                upload_responses.append(result)
                 slug = result.get("slug", "")
                 if not slug:
                     raise RuntimeError(f"Upload returned no slug: {result}")
@@ -339,6 +335,14 @@ class PipelineCoordinator:
                 self._upload_bytes_done = part_base_done + part_size
                 cleanup_dir(part_path)
                 logger.info("Uploaded -> https://filester.me/d/%s", slug)
+
+            if was_split:
+                organize_split_parts_into_folder(
+                    filester,
+                    parent_folder_id=folder_id,
+                    folder_name=job.filename,
+                    upload_responses=upload_responses,
+                )
 
         self._transfer.complete_phase("upload", self._upload_bytes_total)
 

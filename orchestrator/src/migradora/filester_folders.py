@@ -44,13 +44,81 @@ def ensure_split_parts_folder(
 
     title = sanitize_folder_name(video_filename)
     folder = client.create_folder(title, parent_identifier=parent)
+    if not client.folder_is_under_parent(folder.identifier, parent_identifier=parent):
+        logger.warning(
+            "Split subfolder %r (%s) could not be verified under parent %s; "
+            "continuing anyway",
+            title,
+            folder.identifier,
+            parent,
+        )
     logger.info(
-        'Split parts will upload to subfolder %r -> %s (parent %s)',
+        'Split parts subfolder %r -> %s (parent %s)',
         title,
         folder.identifier,
         parent,
     )
     return folder.identifier
+
+
+def organize_split_parts_into_folder(
+    client: FilesterClient,
+    *,
+    parent_folder_id: str,
+    folder_name: str,
+    upload_responses: list[dict],
+) -> str:
+    """Create a video-named subfolder and move uploaded split parts into it.
+
+    Parts are uploaded flat into the studio folder first (Filester API pattern),
+    then bulk-moved into the subfolder once all parts finish uploading.
+    """
+    parent = (parent_folder_id or "").strip()
+    if not parent:
+        return parent
+
+    file_ids = [
+        fid
+        for raw in upload_responses
+        if (fid := client.file_identifier_from_response(raw))
+    ]
+    if not file_ids:
+        logger.warning("Split folder organize skipped: no file ids in upload responses")
+        return parent
+
+    dest_folder_id = ensure_split_parts_folder(client, parent, folder_name)
+    try:
+        move_data = client.move_files(file_ids, dest_folder_id)
+    except Exception as exc:
+        logger.error(
+            "Split folder move failed (%s); %d part(s) remain in studio folder %s",
+            exc,
+            len(file_ids),
+            parent,
+        )
+        return parent
+
+    moved = int(move_data.get("moved") or 0)
+    failed = int(move_data.get("failed") or 0)
+    if failed or moved < len(file_ids):
+        logger.error(
+            "Split folder move incomplete (%d/%d moved, %d failed); "
+            "parts may remain in studio folder %s",
+            moved,
+            len(file_ids),
+            failed,
+            parent,
+        )
+        return parent
+
+    title = sanitize_folder_name(folder_name)
+    logger.info(
+        'Moved %d split part(s) into subfolder %r -> %s',
+        moved,
+        title,
+        dest_folder_id,
+    )
+    return dest_folder_id
 
 
 def _full_path(settings: Settings, gofile_folder_path: str) -> str:

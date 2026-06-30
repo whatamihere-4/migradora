@@ -149,6 +149,22 @@ class CreateFolderConflictTests(unittest.TestCase):
         self.assertEqual(folder.identifier, "hexslug")
         self.assertEqual(folder.parent_db_id, 10)
 
+    def test_file_identifier_from_response_slug(self) -> None:
+        self.assertEqual(
+            FilesterClient.file_identifier_from_response({"slug": "abc123"}),
+            "abc123",
+        )
+
+    def test_move_files_payload(self) -> None:
+        with patch.object(self.client, "_request", return_value={"success": True, "data": {"moved": 2}}) as req:
+            data = self.client.move_files(["a", "b"], "folder-id")
+        self.assertEqual(data["moved"], 2)
+        req.assert_called_once_with(
+            "POST",
+            "/api/v1/files/move",
+            json={"files": ["a", "b"], "folder": "folder-id"},
+        )
+
 
 if __name__ == "__main__":
     unittest.main()

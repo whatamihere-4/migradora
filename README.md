@@ -102,7 +102,9 @@ Files over `FILESTER_MAX_FILE_BYTES` (~9.5 GiB) are split before upload. Set `FI
 
 `ffmpeg_slice` uses more CPU but keeps the same low disk footprint as `bytes` — useful on small VPS disks when you want independently playable parts.
 
-Split uploads are placed in a Filester subfolder under the studio folder, named after the original video filename (e.g. `VR/Studio1/My Scene.mp4/` containing `My Scene.mp4.part001`, … or `My Scene.PART1.mp4`, …).
+Split uploads are placed in a Filester subfolder under the studio folder, named after the original video filename (e.g. `VR/Studio1/My Scene.mp4/` containing the parts). This is automatic when a file exceeds `FILESTER_MAX_FILE_BYTES` — no extra env var.
+
+`FILESTER_SPLIT_MODE` only chooses **how** to split (`bytes` vs `ffmpeg_slice`), not whether parts are grouped into a subfolder.
 
 ## Resuming after restart
 
