@@ -8,6 +8,7 @@
 #   ./scripts/test-gofile-download-speed.sh --seconds 30
 #   ./scripts/test-gofile-download-speed.sh --mib 200
 #   ./scripts/test-gofile-download-speed.sh --probe-servers
+#   ./scripts/test-gofile-download-speed.sh --connections 4 --seconds 30
 set -e
 cd "$(dirname "$0")/.."
 
@@ -15,6 +16,7 @@ GOFILE_URL=""
 SECONDS=30
 SAMPLE_MIB=100
 PROBE_SERVERS=0
+CONNECTIONS=0
 
 while [ $# -gt 0 ]; do
   case "$1" in
@@ -30,6 +32,10 @@ while [ $# -gt 0 ]; do
       PROBE_SERVERS=1
       shift
       ;;
+    --connections)
+      CONNECTIONS="${2:-4}"
+      shift 2
+      ;;
     -*)
       echo "Unknown option: $1" >&2
       exit 1
@@ -41,10 +47,12 @@ while [ $# -gt 0 ]; do
   esac
 done
 
-docker compose exec -T orchestrator python - "$GOFILE_URL" "$SECONDS" "$SAMPLE_MIB" "$PROBE_SERVERS" <<'PY'
+docker compose exec -T orchestrator python - "$GOFILE_URL" "$SECONDS" "$SAMPLE_MIB" "$PROBE_SERVERS" "$CONNECTIONS" <<'PY'
 import sqlite3
 import sys
+import threading
 import time
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from urllib.parse import urlparse
 
 from migradora.config import Settings
@@ -54,6 +62,7 @@ url = (sys.argv[1] if len(sys.argv) > 1 else "").strip()
 seconds = int(sys.argv[2]) if len(sys.argv) > 2 else 30
 sample_mib = int(sys.argv[3]) if len(sys.argv) > 3 else 100
 probe_servers = bool(int(sys.argv[4])) if len(sys.argv) > 4 else False
+connections = int(sys.argv[5]) if len(sys.argv) > 5 else 0
 sample_bytes = sample_mib * 1024 * 1024
 
 if not url:
@@ -140,9 +149,87 @@ with GofileClient(
     elif host.startswith("store-eu-"):
         print(f"CDN node {host} looks like EU (good for a France VPS).", file=sys.stderr)
 
+    if host.startswith("store-na-"):
+        if len(raw_hosts) <= 1:
+            print(
+                f"Note: CDN node {host} is North America and this file has no EU mirror.\n"
+                "GOFILE_CDN_PROBE will not help. Try: GOFILE_DOWNLOAD_CONNECTIONS=4 in .env\n"
+                "or: ./scripts/test-gofile-download-speed.sh --connections 4",
+                file=sys.stderr,
+            )
+        else:
+            print(
+                f"Note: CDN node {host} is North America — a France VPS may be slow on this route.\n"
+                "Try: GOFILE_CDN_PROBE=true and/or GOFILE_DOWNLOAD_CONNECTIONS=4 in .env",
+                file=sys.stderr,
+            )
+    elif host.startswith("store-eu-"):
+        print(f"CDN node {host} looks like EU (good for a France VPS).", file=sys.stderr)
+
+    test_connections = connections or settings.gofile_download_connections
+    if test_connections <= 0:
+        test_connections = 1
+
+    def download_single() -> int:
+        nbytes = 0
+        start = time.monotonic()
+        deadline = start + seconds
+        with client._client.stream("GET", link, follow_redirects=True) as resp:
+            resp.raise_for_status()
+            for chunk in resp.iter_bytes(chunk_size=1024 * 1024):
+                if not chunk:
+                    continue
+                nbytes += len(chunk)
+                if nbytes >= sample_bytes or time.monotonic() >= deadline:
+                    break
+        return nbytes
+
+    def download_parallel() -> int:
+        total_size = int(content_length) if content_length else sample_bytes
+        span = min(sample_bytes, total_size)
+        conns = min(test_connections, span)
+        chunk = (span + conns - 1) // conns
+        ranges: list[tuple[int, int]] = []
+        for index in range(conns):
+            start = index * chunk
+            if start >= span:
+                break
+            end = min(start + chunk - 1, span - 1)
+            ranges.append((start, end))
+
+        downloaded = 0
+        lock = threading.Lock()
+        start = time.monotonic()
+        deadline = start + seconds
+
+        def fetch_range(span_range: tuple[int, int]) -> int:
+            start_b, end_b = span_range
+            nbytes = 0
+            headers = {"Range": f"bytes={start_b}-{end_b}"}
+            with client._client.stream(
+                "GET", link, headers=headers, follow_redirects=True
+            ) as resp:
+                resp.raise_for_status()
+                for chunk in resp.iter_bytes(chunk_size=1024 * 1024):
+                    if not chunk:
+                        continue
+                    nbytes += len(chunk)
+                    if time.monotonic() >= deadline:
+                        break
+            return nbytes
+
+        with ThreadPoolExecutor(max_workers=len(ranges)) as pool:
+            futures = [pool.submit(fetch_range, span_range) for span_range in ranges]
+            for future in as_completed(futures):
+                downloaded += future.result()
+                if downloaded >= sample_bytes or time.monotonic() >= deadline:
+                    break
+                if downloaded >= sample_bytes:
+                    break
+        return min(downloaded, sample_bytes)
+
     downloaded = 0
     start = time.monotonic()
-    deadline = start + seconds
     status = None
     content_length = None
 
@@ -153,14 +240,15 @@ with GofileClient(
         if content_length:
             print(f"Content-Length: {int(content_length) / (1024**3):.2f} GiB", file=sys.stderr)
         resp.raise_for_status()
-        for chunk in resp.iter_bytes(chunk_size=1024 * 1024):
-            if not chunk:
-                continue
-            downloaded += len(chunk)
-            if downloaded >= sample_bytes or time.monotonic() >= deadline:
-                break
 
-elapsed = max(time.monotonic() - start, 0.001)
+    if test_connections > 1:
+        print(f"\nSpeed test: {test_connections} parallel Range connections", file=sys.stderr)
+        downloaded = download_parallel()
+    else:
+        print("\nSpeed test: single connection", file=sys.stderr)
+        downloaded = download_single()
+
+    elapsed = max(time.monotonic() - start, 0.001)
 mb_s = (downloaded / (1024 * 1024)) / elapsed
 
 print(file=sys.stderr)
