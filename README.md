@@ -83,6 +83,7 @@ orchestrator (single container)
 | Script | Purpose |
 |--------|---------|
 | `./scripts/test-gofile-resolve.sh [url]` | Test API token (folder list or file resolve) |
+| `./scripts/test-gofile-download-speed.sh [url]` | Resolve CDN link + `curl` speed test (diagnose slow downloads) |
 | `./scripts/reset-failed-jobs.sh` | Reset failed/stuck jobs |
 | `./scripts/health-check.sh` | Quick VPS diagnostics |
 | `./scripts/check-webui-port.sh` | Verify WEBUI_PORT binding |
