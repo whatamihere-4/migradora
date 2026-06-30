@@ -123,12 +123,6 @@ class CreateFolderConflictTests(unittest.TestCase):
         self.assertEqual(folder.parent_identifier, "558b65a42fdad1f6")
 
     def test_nested_create_does_not_reuse_root_folder(self) -> None:
-        root = FilesterFolder(identifier="root-id", name="CzechVR")
-        nested = FilesterFolder(
-            identifier="nested-id",
-            name="CzechVR",
-            parent_identifier="vr-id",
-        )
         create_body = {
             "success": True,
             "data": {
@@ -138,13 +132,50 @@ class CreateFolderConflictTests(unittest.TestCase):
             },
         }
 
-        with patch.object(self.client, "find_folder", return_value=root) as find_folder:
+        with patch.object(self.client, "find_folder") as find_folder:
             with patch.object(self.client, "_find_folder_under_parent", return_value=None):
-                with patch.object(self.client, "_post_folder", return_value=create_body):
-                    folder = self.client.create_folder("CzechVR", parent_identifier="vr-id")
+                with patch.object(
+                    self.client,
+                    "_resolve_existing_nested_folder",
+                    return_value=None,
+                ):
+                    with patch.object(self.client, "_post_folder", return_value=create_body):
+                        folder = self.client.create_folder(
+                            "CzechVR",
+                            parent_identifier="vr-id",
+                        )
         self.assertEqual(folder.identifier, "nested-id")
         self.assertEqual(folder.parent_identifier, "vr-id")
         find_folder.assert_not_called()
+
+    def test_nested_create_reuses_existing_under_parent_on_409(self) -> None:
+        existing = FilesterFolder(
+            identifier="nested-id",
+            name="CzechVR",
+            parent_identifier="vr-id",
+        )
+
+        conflict = httpx.Response(
+            409,
+            request=httpx.Request("POST", "https://u1.filester.me/api/v1/folder"),
+            json={
+                "success": False,
+                "message": "You already have a folder with this name here",
+                "error": "DUPLICATE_NAME",
+            },
+        )
+
+        with patch.object(
+            self.client,
+            "_resolve_existing_nested_folder",
+            return_value=existing,
+        ):
+            with patch.object(self.client, "_post_folder", side_effect=httpx.HTTPStatusError(
+                "conflict", request=conflict.request, response=conflict
+            )):
+                folder = self.client.create_folder("CzechVR", parent_identifier="vr-id")
+        self.assertEqual(folder.identifier, "nested-id")
+        self.assertEqual(folder.parent_identifier, "vr-id")
 
     def test_parse_folder_keeps_hex_identifier_separate_from_db_id(self) -> None:
         folder = FilesterClient._parse_folder({

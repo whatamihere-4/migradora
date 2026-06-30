@@ -25,7 +25,7 @@ def _print_folder(label: str, folder: FilesterFolder | None) -> None:
         return
     print(
         f"  {label}: name={folder.name!r} identifier={folder.identifier!r} "
-        f"db_id={folder.db_id} parent_db_id={folder.parent_db_id}"
+        f"parent={folder.parent_identifier!r} db_id={folder.db_id}"
     )
 
 
@@ -295,14 +295,15 @@ def run_probe_args(args: argparse.Namespace) -> int:
                 dry_run=args.dry_run,
             )
 
-        _probe_create_variants(
-            client,
-            args.name,
-            args.parent_db_id,
-            args.parent_identifier,
-            dry_run=args.dry_run,
-            nested_only=args.nested_only,
-        )
+        if not args.nested_only:
+            _probe_create_variants(
+                client,
+                args.name,
+                args.parent_db_id,
+                args.parent_identifier,
+                dry_run=args.dry_run,
+                nested_only=False,
+            )
 
         print("\n== client.create_folder() (production code path) ==")
         if args.dry_run:
@@ -315,6 +316,13 @@ def run_probe_args(args: argparse.Namespace) -> int:
                     parent_identifier=args.parent_identifier,
                 )
                 _print_folder("result", folder)
+                if folder.parent_identifier and args.parent_identifier:
+                    print("\n== GET folder detail (production result) ==")
+                    for path in (
+                        f"/api/v1/folder/{folder.identifier}",
+                        f"/api/v1/folders/{folder.identifier}",
+                    ):
+                        _try_request(client, "detail", "GET", path)
             except Exception as exc:
                 print(f"  ERROR: {exc}")
 
