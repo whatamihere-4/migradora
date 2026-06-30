@@ -234,6 +234,9 @@ class PipelineCoordinator:
         with GofileClient(
             token=self.settings.gofile_token,
             password=self.settings.gofile_password,
+            cdn_prefer=self.settings.gofile_cdn_prefer,
+            cdn_probe=self.settings.gofile_cdn_probe,
+            download_connections=self.settings.gofile_download_connections,
         ) as gofile:
             dest = gofile.safe_dest_path(job_dir, job.filename)
             gofile.download_file(

@@ -50,6 +50,9 @@ class Settings:
     gofile_folder_urls: list[str] = field(default_factory=list)
     gofile_token: str = ""
     gofile_password: str = ""
+    gofile_cdn_prefer: str = "eu"  # eu | na | auto
+    gofile_cdn_probe: bool = False
+    gofile_download_connections: int = 1
 
     # Filester
     filester_api_key: str = ""
@@ -120,6 +123,9 @@ class Settings:
             gofile_folder_urls=_env_list("GOFILE_FOLDER_URLS"),
             gofile_token=_env("GOFILE_TOKEN"),
             gofile_password=_env("GOFILE_PASSWORD"),
+            gofile_cdn_prefer=_env("GOFILE_CDN_PREFER", "eu").lower() or "eu",
+            gofile_cdn_probe=_env_bool("GOFILE_CDN_PROBE", False),
+            gofile_download_connections=max(1, _env_int("GOFILE_DOWNLOAD_CONNECTIONS", 1)),
             filester_api_key=_env("FILESTER_API_KEY"),
             filester_api_base=_env("FILESTER_API_BASE", "https://u1.filester.me").rstrip("/"),
             filester_root_folder_name=_env("FILESTER_ROOT_FOLDER_NAME"),

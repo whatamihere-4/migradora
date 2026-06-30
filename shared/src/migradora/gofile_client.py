@@ -4,7 +4,9 @@ from __future__ import annotations
 
 import hashlib
 import logging
+import threading
 import time
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass
 from pathlib import Path
 from collections.abc import Callable, Iterator
@@ -23,6 +25,66 @@ _USER_AGENT = (
 _STATIC_WT = "4fd6sg89d7s6"
 _API = "https://api.gofile.io"
 _PAGE_SIZE = 1000
+_CDN_PREFER_VALUES = frozenset({"eu", "na", "auto"})
+_PROBE_SAMPLE_BYTES = 2 * 1024 * 1024
+
+
+def _host_from_gofile_url(url: str) -> str:
+    host = (urlparse(url).hostname or "").lower()
+    if host.endswith(".gofile.io"):
+        return host[: -len(".gofile.io")]
+    return host
+
+
+def _server_hosts_from_file_data(data: dict[str, Any]) -> list[str]:
+    hosts: list[str] = []
+    servers = data.get("servers")
+    if isinstance(servers, list):
+        hosts.extend(str(s).strip() for s in servers if s)
+    selected = data.get("serverSelected")
+    if selected:
+        hosts.append(str(selected).strip())
+    link = data.get("link") or data.get("directLink")
+    if link:
+        host = _host_from_gofile_url(str(link))
+        if host:
+            hosts.append(host)
+    seen: set[str] = set()
+    ordered: list[str] = []
+    for host in hosts:
+        if host and host not in seen:
+            seen.add(host)
+            ordered.append(host)
+    return ordered
+
+
+def _region_rank(host: str, prefer: str) -> tuple[int, str]:
+    host_l = host.lower()
+    if prefer == "auto":
+        return (0, host_l)
+    if prefer == "eu":
+        if "eu" in host_l or host_l.startswith("store-eu"):
+            return (0, host_l)
+        if "na" in host_l or host_l.startswith("store-na"):
+            return (2, host_l)
+        return (1, host_l)
+    if prefer == "na":
+        if "na" in host_l or host_l.startswith("store-na"):
+            return (0, host_l)
+        if "eu" in host_l or host_l.startswith("store-eu"):
+            return (2, host_l)
+        return (1, host_l)
+    return (1, host_l)
+
+
+def _order_server_hosts(hosts: list[str], prefer: str) -> list[str]:
+    if prefer == "auto" or not hosts:
+        return hosts
+    return sorted(hosts, key=lambda h: _region_rank(h, prefer))
+
+
+def _build_download_url(server: str, file_id: str, name: str) -> str:
+    return f"https://{server}.gofile.io/download/web/{file_id}/{quote(name)}"
 
 
 @dataclass(frozen=True)
@@ -74,11 +136,20 @@ class GofileClient:
         password: str = "",
         *,
         timeout_sec: float = 120.0,
+        cdn_prefer: str = "eu",
+        cdn_probe: bool = False,
+        download_connections: int = 1,
     ) -> None:
         if not token.strip():
             raise ValueError("GOFILE_TOKEN is required (premium account)")
         self.token = token.strip()
         self.password = password.strip()
+        prefer = (cdn_prefer or "eu").lower()
+        if prefer not in _CDN_PREFER_VALUES:
+            raise ValueError(f"cdn_prefer must be one of {sorted(_CDN_PREFER_VALUES)}")
+        self.cdn_prefer = prefer
+        self.cdn_probe = cdn_probe
+        self.download_connections = max(1, download_connections)
         self._client = httpx.Client(
             timeout=httpx.Timeout(timeout_sec, connect=30.0),
             headers={
@@ -148,19 +219,73 @@ class GofileClient:
         body = self._request_json(f"/contents/{folder_id}", params=params)
         return body["data"]
 
-    def _link_from_file_data(self, data: dict[str, Any], file_id: str) -> str | None:
-        link = data.get("link") or data.get("directLink")
-        if link:
-            return str(link)
-        server = data.get("serverSelected")
-        if not server:
-            servers = data.get("servers")
-            if isinstance(servers, list) and servers:
-                server = servers[0]
+    def _probe_download_speed(self, url: str, sample_bytes: int = _PROBE_SAMPLE_BYTES) -> float:
+        """Return bytes/sec for a short Range sample, or 0.0 if the URL is unusable."""
+        try:
+            headers = {"Range": f"bytes=0-{sample_bytes - 1}"}
+            nbytes = 0
+            start = time.monotonic()
+            with self._client.stream(
+                "GET", url, headers=headers, follow_redirects=True
+            ) as resp:
+                if resp.status_code not in (200, 206):
+                    return 0.0
+                for chunk in resp.iter_bytes(chunk_size=256 * 1024):
+                    if not chunk:
+                        continue
+                    nbytes += len(chunk)
+                    if nbytes >= sample_bytes:
+                        break
+            elapsed = time.monotonic() - start
+            return nbytes / elapsed if elapsed > 0 else 0.0
+        except Exception:
+            logger.debug("CDN probe failed for %s", url[:80], exc_info=True)
+            return 0.0
+
+    def _candidate_download_urls(self, data: dict[str, Any], file_id: str) -> list[str]:
         name = data.get("name")
-        if server and name:
-            return f"https://{server}.gofile.io/download/web/{file_id}/{quote(name)}"
-        return None
+        if not name:
+            link = data.get("link") or data.get("directLink")
+            return [str(link)] if link else []
+
+        hosts = _order_server_hosts(_server_hosts_from_file_data(data), self.cdn_prefer)
+        if hosts:
+            return [_build_download_url(host, file_id, str(name)) for host in hosts]
+
+        link = data.get("link") or data.get("directLink")
+        return [str(link)] if link else []
+
+    def _pick_download_url(self, candidates: list[str]) -> str | None:
+        if not candidates:
+            return None
+        if len(candidates) == 1 or not self.cdn_probe:
+            return candidates[0]
+
+        best_url = candidates[0]
+        best_speed = 0.0
+        for url in candidates:
+            speed = self._probe_download_speed(url)
+            logger.info("CDN probe %s -> %.1f MiB/s", _host_from_gofile_url(url), speed / (1024**2))
+            if speed > best_speed:
+                best_speed = speed
+                best_url = url
+        if best_speed <= 0:
+            logger.warning("CDN probe found no working mirror; using %s", best_url[:80])
+        return best_url
+
+    def _link_from_file_data(self, data: dict[str, Any], file_id: str) -> str | None:
+        candidates = self._candidate_download_urls(data, file_id)
+        link = self._pick_download_url(candidates)
+        if link and len(candidates) > 1:
+            host = _host_from_gofile_url(link)
+            logger.info(
+                "CDN pick %s (%d candidates, prefer=%s, probe=%s)",
+                host,
+                len(candidates),
+                self.cdn_prefer,
+                self.cdn_probe,
+            )
+        return link
 
     def get_file_info(self, file_id: str) -> dict[str, Any]:
         body = self._request_json(f"/contents/{file_id}")
@@ -216,6 +341,89 @@ class GofileClient:
                 break
             page += 1
 
+    def _download_single_stream(
+        self,
+        url: str,
+        part: Path,
+        *,
+        offset: int,
+        expected_size: int | None,
+        throttle_kbps: int,
+        on_progress: Callable[[int, int | None], None] | None,
+    ) -> None:
+        headers: dict[str, str] = {}
+        if offset:
+            headers["Range"] = f"bytes={offset}-"
+            logger.info("Resuming download at byte %d -> %s", offset, part.stem)
+        mode = "ab" if offset else "wb"
+        with self._client.stream("GET", url, headers=headers, follow_redirects=True) as resp:
+            if resp.status_code == 416:
+                if expected_size and offset == expected_size:
+                    return
+                raise RuntimeError(f"Download range not satisfiable at offset {offset}")
+            if resp.status_code not in (200, 206):
+                resp.raise_for_status()
+            with part.open(mode) as fh:
+                for chunk in resp.iter_bytes(chunk_size=1024 * 1024):
+                    fh.write(chunk)
+                    if on_progress:
+                        on_progress(part.stat().st_size, expected_size)
+                    if throttle_kbps > 0:
+                        time.sleep(len(chunk) / (throttle_kbps * 1024))
+
+    def _download_parallel_ranges(
+        self,
+        url: str,
+        part: Path,
+        total_size: int,
+        *,
+        connections: int,
+        on_progress: Callable[[int, int | None], None] | None,
+    ) -> None:
+        connections = min(connections, total_size)
+        chunk = (total_size + connections - 1) // connections
+        ranges: list[tuple[int, int]] = []
+        for index in range(connections):
+            start = index * chunk
+            if start >= total_size:
+                break
+            end = min(start + chunk - 1, total_size - 1)
+            ranges.append((start, end))
+
+        progress_bytes = 0
+        progress_lock = threading.Lock()
+
+        def fetch_range(span: tuple[int, int]) -> Path:
+            start, end = span
+            temp = part.with_suffix(f"{part.suffix}.{start}")
+            headers = {"Range": f"bytes={start}-{end}"}
+            with self._client.stream(
+                "GET", url, headers=headers, follow_redirects=True
+            ) as resp:
+                if resp.status_code not in (200, 206):
+                    resp.raise_for_status()
+                with temp.open("wb") as fh:
+                    for chunk in resp.iter_bytes(chunk_size=1024 * 1024):
+                        fh.write(chunk)
+            return temp
+
+        temps: list[tuple[int, Path]] = []
+        with ThreadPoolExecutor(max_workers=len(ranges)) as pool:
+            futures = {pool.submit(fetch_range, span): span for span in ranges}
+            for future in as_completed(futures):
+                start, _ = futures[future]
+                temp = future.result()
+                temps.append((start, temp))
+                if on_progress:
+                    with progress_lock:
+                        progress_bytes += temp.stat().st_size
+                        on_progress(progress_bytes, total_size)
+
+        with part.open("wb") as out:
+            for _, temp in sorted(temps, key=lambda item: item[0]):
+                out.write(temp.read_bytes())
+                temp.unlink(missing_ok=True)
+
     def download_file(
         self,
         gofile_url: str,
@@ -231,27 +439,39 @@ class GofileClient:
         dest.parent.mkdir(parents=True, exist_ok=True)
         part = dest.with_suffix(dest.suffix + ".part")
         offset = part.stat().st_size if part.exists() else 0
-        headers: dict[str, str] = {}
-        if offset:
-            headers["Range"] = f"bytes={offset}-"
-            logger.info("Resuming download at byte %d -> %s", offset, dest.name)
+        if offset and expected_size and offset == expected_size:
+            part.rename(dest)
+            return str(dest)
 
-        mode = "ab" if offset else "wb"
-        with self._client.stream("GET", direct, headers=headers, follow_redirects=True) as resp:
-            if resp.status_code == 416:
-                if expected_size and offset == expected_size:
-                    part.rename(dest)
-                    return str(dest)
-                raise RuntimeError(f"Download range not satisfiable at offset {offset}")
-            if resp.status_code not in (200, 206):
-                resp.raise_for_status()
-            with part.open(mode) as fh:
-                for chunk in resp.iter_bytes(chunk_size=1024 * 1024):
-                    fh.write(chunk)
-                    if on_progress:
-                        on_progress(part.stat().st_size, expected_size)
-                    if throttle_kbps > 0:
-                        time.sleep(len(chunk) / (throttle_kbps * 1024))
+        use_parallel = (
+            offset == 0
+            and throttle_kbps <= 0
+            and self.download_connections > 1
+            and expected_size
+            and expected_size > 0
+        )
+        if use_parallel:
+            logger.info(
+                "Parallel download (%d connections) -> %s",
+                self.download_connections,
+                dest.name,
+            )
+            self._download_parallel_ranges(
+                direct,
+                part,
+                expected_size,
+                connections=self.download_connections,
+                on_progress=on_progress,
+            )
+        else:
+            self._download_single_stream(
+                direct,
+                part,
+                offset=offset,
+                expected_size=expected_size,
+                throttle_kbps=throttle_kbps,
+                on_progress=on_progress,
+            )
 
         part.rename(dest)
         size = dest.stat().st_size
