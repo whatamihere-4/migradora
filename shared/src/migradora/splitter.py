@@ -7,18 +7,46 @@ import math
 from collections.abc import Callable, Iterator
 from pathlib import Path
 
+from migradora.ffmpeg_splitter import SplitError, iter_upload_parts_sliced
+
 logger = logging.getLogger("migradora.splitter")
 
 _CHUNK_SIZE = 8 * 1024 * 1024
 _SKIP_CHECK_EVERY_CHUNKS = 32
 
+_SPLIT_MODE_ALIASES = {
+    "splice": "bytes",
+    "byte": "bytes",
+    "bytes": "bytes",
+    "cat": "bytes",
+    "ffmpeg_slice": "ffmpeg_slice",
+    "ffmpeg-slice": "ffmpeg_slice",
+    "slice": "ffmpeg_slice",
+}
 
-def required_disk_bytes(file_size: int, part_size_bytes: int) -> int:
+
+def parse_split_mode(raw: str, *, default: str = "bytes") -> str:
+    mode = _SPLIT_MODE_ALIASES.get(raw.strip().lower())
+    if mode:
+        return mode
+    logger.warning("Unknown FILESTER_SPLIT_MODE %r; using %s", raw, default)
+    return default
+
+
+def required_disk_bytes(
+    file_size: int,
+    part_size_bytes: int,
+    *,
+    split_mode: str = "bytes",
+) -> int:
     """Peak bytes on disk while processing one job (source + at most one part)."""
     if file_size <= 0:
         return 0
     if file_size <= part_size_bytes:
         return file_size
+    if split_mode == "ffmpeg":
+        return file_size * 2
+    # bytes and ffmpeg_slice: source + one part at a time
     return file_size + part_size_bytes
 
 
@@ -46,26 +74,15 @@ def _extract_part(
             chunks += 1
 
 
-def iter_upload_parts(
-    source: str | Path,
-    output_dir: str | Path,
+def _iter_upload_parts_bytes(
+    source: Path,
+    output_dir: Path,
     part_size_bytes: int,
-    base_name: str | None = None,
-    skip_check: Callable[[], None] | None = None,
+    base_name: str | None,
+    skip_check: Callable[[], None] | None,
+    *,
+    delete_source: bool,
 ) -> Iterator[dict]:
-    """
-    Yield upload parts one at a time.
-
-    Only one part file exists on disk alongside the source at any moment, so a
-    24 GB file needs ~34 GB peak (source + 9.5 GB part) instead of ~48 GB (all parts).
-    """
-    source = Path(source)
-    output_dir = Path(output_dir)
-    output_dir.mkdir(parents=True, exist_ok=True)
-
-    if not source.exists():
-        raise FileNotFoundError(f"Source file not found: {source}")
-
     total_size = source.stat().st_size
     if total_size <= part_size_bytes:
         yield {
@@ -73,15 +90,19 @@ def iter_upload_parts(
             "filename": source.name,
             "size_bytes": total_size,
             "part_index": 0,
+            "part_count": 1,
             "is_source": True,
+            "original_basename": source.name,
+            "split_mode": "bytes",
         }
         return
 
     stem = base_name or source.stem
     suffix = source.suffix
     num_parts = math.ceil(total_size / part_size_bytes)
+    part_prefix = source.name if not base_name else f"{stem}{suffix}"
     logger.info(
-        "Splitting %s (%d bytes) into %d part(s) of up to %d bytes each",
+        "Splitting %s (%d bytes) into %d byte part(s) of up to %d bytes each",
         source.name,
         total_size,
         num_parts,
@@ -91,7 +112,7 @@ def iter_upload_parts(
     for idx in range(num_parts):
         offset = idx * part_size_bytes
         part_size = min(part_size_bytes, total_size - offset)
-        part_name = f"{stem}.part{idx + 1:03d}{suffix}"
+        part_name = f"{part_prefix}.part{idx + 1:03d}"
         part_path = output_dir / part_name
         logger.info(
             "Extracting part %d/%d: %s (%d bytes)",
@@ -106,11 +127,68 @@ def iter_upload_parts(
             "filename": part_name,
             "size_bytes": part_size,
             "part_index": idx + 1,
+            "part_count": num_parts,
             "is_source": False,
+            "original_basename": source.name,
+            "split_mode": "bytes",
         }
 
-    source.unlink()
-    logger.info("Removed source after splitting: %s", source.name)
+    if delete_source:
+        source.unlink(missing_ok=True)
+        logger.info("Removed source after splitting: %s", source.name)
+
+
+def iter_upload_parts(
+    source: str | Path,
+    output_dir: str | Path,
+    part_size_bytes: int,
+    base_name: str | None = None,
+    skip_check: Callable[[], None] | None = None,
+    *,
+    split_mode: str = "bytes",
+    ffmpeg_bin: str = "ffmpeg",
+    ffprobe_bin: str = "ffprobe",
+    ffmpeg_timeout: int = 7200,
+    delete_source: bool = True,
+) -> Iterator[dict]:
+    """
+    Yield upload parts one at a time.
+
+    ``bytes`` (default): byte-range parts rejoined with ``cat``. Only one part
+    exists on disk alongside the source at any moment.
+
+    ``ffmpeg_slice``: stream-copy parts via ffmpeg one at a time (playable,
+    same peak disk as bytes mode; more CPU).
+    """
+    source = Path(source)
+    output_dir = Path(output_dir)
+    output_dir.mkdir(parents=True, exist_ok=True)
+
+    if not source.exists():
+        raise FileNotFoundError(f"Source file not found: {source}")
+
+    mode = parse_split_mode(split_mode)
+    if mode == "ffmpeg_slice":
+        yield from iter_upload_parts_sliced(
+            source,
+            output_dir,
+            part_size_bytes,
+            ffmpeg_bin=ffmpeg_bin,
+            ffprobe_bin=ffprobe_bin,
+            ffmpeg_timeout=ffmpeg_timeout,
+            skip_check=skip_check,
+            delete_source=delete_source,
+        )
+        return
+
+    yield from _iter_upload_parts_bytes(
+        source,
+        output_dir,
+        part_size_bytes,
+        base_name,
+        skip_check,
+        delete_source=delete_source,
+    )
 
 
 def split_file(

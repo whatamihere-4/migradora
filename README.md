@@ -93,11 +93,14 @@ See [docs/CADDY.md](docs/CADDY.md) if you proxy through your existing Caddy stac
 
 ## Large files
 
-Files over `FILESTER_MAX_FILE_BYTES` (~9.5 GiB) are split with `split(1)`. Reassemble:
+Files over `FILESTER_MAX_FILE_BYTES` (~9.5 GiB) are split before upload. Set `FILESTER_SPLIT_MODE`:
 
-```bash
-cat video.part*.mp4 > video.mp4
-```
+| Mode | Parts | Peak disk | Rejoin |
+|------|-------|-----------|--------|
+| `bytes` (default) | `movie.mp4.part001`, … | source + one part | `cat movie.mp4.part* > movie.mp4` |
+| `ffmpeg_slice` | `movie.PART1.mp4`, … (playable) | source + one part | `ffmpeg -f concat -safe 0 -i list.txt -c copy movie.mp4` |
+
+`ffmpeg_slice` uses more CPU but keeps the same low disk footprint as `bytes` — useful on small VPS disks when you want independently playable parts.
 
 ## Resuming after restart
 

@@ -33,7 +33,12 @@ def required_disk_gb(file_size: int, settings: Settings) -> float:
     if file_size <= 0:
         return float(settings.min_free_disk_gb)
     return (
-        required_disk_bytes(file_size, settings.filester_max_file_bytes) / _GIB
+        required_disk_bytes(
+            file_size,
+            settings.filester_max_file_bytes,
+            split_mode=settings.filester_split_mode,
+        )
+        / _GIB
         + settings.min_free_disk_gb
     )
 

@@ -3,8 +3,10 @@
 services:
   orchestrator:
     networks:
-      - default
-      - caddy_net
+      default: {}
+      caddy_net:
+        aliases:
+          - migradora
     ports: !override
       - "127.0.0.1:${WEBUI_PORT:-8080}:${WEBUI_PORT:-8080}"
 

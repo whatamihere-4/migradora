@@ -9,6 +9,7 @@ from pathlib import Path
 from dotenv import load_dotenv
 
 from migradora.filester_folders_file import load_filester_folders
+from migradora.splitter import parse_split_mode
 
 
 def _env(key: str, default: str = "") -> str:
@@ -59,6 +60,10 @@ class Settings:
     filester_folders: dict[str, str] = field(default_factory=dict)
     filester_auto_create_folders: bool = True
     filester_max_file_bytes: int = 10_200_547_328  # 9.5 GiB
+    filester_split_mode: str = "bytes"
+    ffmpeg_bin: str = "ffmpeg"
+    ffprobe_bin: str = "ffprobe"
+    ffmpeg_timeout_sec: int = 7200
 
     # Paths
     download_dir: str = "/data/downloads"
@@ -123,6 +128,10 @@ class Settings:
             filester_folders=load_filester_folders(folders_file),
             filester_auto_create_folders=_env_bool("FILESTER_AUTO_CREATE_FOLDERS", True),
             filester_max_file_bytes=_env_int("FILESTER_MAX_FILE_BYTES", 10_200_547_328),
+            filester_split_mode=parse_split_mode(_env("FILESTER_SPLIT_MODE", "bytes")),
+            ffmpeg_bin=_env("FFMPEG_BIN", "ffmpeg"),
+            ffprobe_bin=_env("FFPROBE_BIN", "ffprobe"),
+            ffmpeg_timeout_sec=_env_int("SPLITTER_FFMPEG_TIMEOUT_SEC", 7200),
             download_dir=_env("DOWNLOAD_DIR", "/data/downloads"),
             state_dir=state_dir,
             log_dir=_env("LOG_DIR", "/data/logs"),

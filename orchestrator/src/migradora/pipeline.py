@@ -291,6 +291,10 @@ class PipelineCoordinator:
                 self.settings.filester_max_file_bytes,
                 base_name=local_path.stem,
                 skip_check=lambda: self._check_skip(job.id),
+                split_mode=self.settings.filester_split_mode,
+                ffmpeg_bin=self.settings.ffmpeg_bin,
+                ffprobe_bin=self.settings.ffprobe_bin,
+                ffmpeg_timeout=self.settings.ffmpeg_timeout_sec,
             ):
                 self._check_skip(job.id)
                 part_path = Path(part["path"])
