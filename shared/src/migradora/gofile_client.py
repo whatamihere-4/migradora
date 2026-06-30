@@ -291,6 +291,22 @@ class GofileClient:
         body = self._request_json(f"/contents/{file_id}")
         return body["data"]
 
+    def mirror_hosts_from_info(self, info: dict[str, Any]) -> tuple[list[str], list[str]]:
+        """Return (raw API hosts, hosts after GOFILE_CDN_PREFER ordering)."""
+        raw = _server_hosts_from_file_data(info)
+        return raw, _order_server_hosts(raw, self.cdn_prefer)
+
+    def candidate_download_urls_for_info(self, info: dict[str, Any], file_id: str) -> list[str]:
+        return self._candidate_download_urls(info, file_id)
+
+    def probe_mirror_speeds(self, urls: list[str]) -> list[tuple[str, float]]:
+        """Probe each URL with a short Range sample; returns (url, bytes/sec)."""
+        return [(url, self._probe_download_speed(url)) for url in urls]
+
+    @staticmethod
+    def host_from_download_url(url: str) -> str:
+        return _host_from_gofile_url(url)
+
     def resolve_direct_link(self, gofile_url: str) -> str:
         """Resolve a Gofile file page URL to a CDN download link."""
         _, file_id = parse_gofile_url(gofile_url)

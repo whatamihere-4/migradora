@@ -48,13 +48,7 @@ import time
 from urllib.parse import urlparse
 
 from migradora.config import Settings
-from migradora.gofile_client import (
-    GofileClient,
-    _host_from_gofile_url,
-    _order_server_hosts,
-    _server_hosts_from_file_data,
-    parse_gofile_url,
-)
+from migradora.gofile_client import GofileClient, parse_gofile_url
 
 url = (sys.argv[1] if len(sys.argv) > 1 else "").strip()
 seconds = int(sys.argv[2]) if len(sys.argv) > 2 else 30
@@ -116,25 +110,22 @@ with GofileClient(
     download_connections=settings.gofile_download_connections,
 ) as client:
     info = client.get_file_info(file_id)
-    hosts = _server_hosts_from_file_data(info)
-    ordered = _order_server_hosts(hosts, settings.gofile_cdn_prefer)
-    print(f"API servers: {hosts}", file=sys.stderr)
+    raw_hosts, ordered_hosts = client.mirror_hosts_from_info(info)
+    print(f"API servers: {raw_hosts}", file=sys.stderr)
     print(f"serverSelected: {info.get('serverSelected')!r}", file=sys.stderr)
-    if ordered != hosts:
-        print(f"After prefer={settings.gofile_cdn_prefer}: {ordered}", file=sys.stderr)
+    if ordered_hosts != raw_hosts:
+        print(f"After prefer={settings.gofile_cdn_prefer}: {ordered_hosts}", file=sys.stderr)
 
-    candidates = client._candidate_download_urls(info, file_id)
+    candidates = client.candidate_download_urls_for_info(info, file_id)
     if probe_servers or settings.gofile_cdn_probe:
         print("\nProbing mirrors (2 MiB sample each):", file=sys.stderr)
-        scored: list[tuple[float, str]] = []
-        for candidate in candidates:
-            host = _host_from_gofile_url(candidate)
-            speed = client._probe_download_speed(candidate)
+        scored = client.probe_mirror_speeds(candidates)
+        for candidate, speed in scored:
+            host = client.host_from_download_url(candidate)
             mib_s = speed / (1024**2)
-            scored.append((speed, candidate))
             print(f"  {host}: {mib_s:.1f} MiB/s ({mib_s * 8:.0f} Mbps)", file=sys.stderr)
-        scored.sort(reverse=True)
-        link = scored[0][1] if scored and scored[0][0] > 0 else client.resolve_direct_link(url)
+        scored.sort(key=lambda item: item[1], reverse=True)
+        link = scored[0][0] if scored and scored[0][1] > 0 else client.resolve_direct_link(url)
     else:
         link = client.resolve_direct_link(url)
 
