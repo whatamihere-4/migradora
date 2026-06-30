@@ -1,32 +1,53 @@
 #!/bin/sh
-# Resolve a Gofile file URL to the CDN link and measure raw download speed.
-# Runs entirely inside the orchestrator container (python sqlite + curl).
+# Resolve a Gofile file URL to the CDN link and measure download speed using the
+# same httpx client + auth headers as migradora (plain curl often gets 0 bytes).
 #
 # Usage:
 #   ./scripts/test-gofile-download-speed.sh
 #   ./scripts/test-gofile-download-speed.sh 'https://gofile.io/d/...#file=...'
 #   ./scripts/test-gofile-download-speed.sh --seconds 30
+#   ./scripts/test-gofile-download-speed.sh --mib 200
 set -e
 cd "$(dirname "$0")/.."
 
-GOFILE_URL="${1:-}"
-SECONDS=120
-if [ "$GOFILE_URL" = "--seconds" ]; then
-  SECONDS="${2:-120}"
-  GOFILE_URL="${3:-}"
-fi
+GOFILE_URL=""
+SECONDS=30
+SAMPLE_MIB=100
 
-docker compose exec -T orchestrator python - "$GOFILE_URL" "$SECONDS" <<'PY'
+while [ $# -gt 0 ]; do
+  case "$1" in
+    --seconds)
+      SECONDS="${2:-30}"
+      shift 2
+      ;;
+    --mib)
+      SAMPLE_MIB="${2:-100}"
+      shift 2
+      ;;
+    -*)
+      echo "Unknown option: $1" >&2
+      exit 1
+      ;;
+    *)
+      GOFILE_URL="$1"
+      shift
+      ;;
+  esac
+done
+
+docker compose exec -T orchestrator python - "$GOFILE_URL" "$SECONDS" "$SAMPLE_MIB" <<'PY'
 import sqlite3
-import subprocess
 import sys
 import time
+from urllib.parse import urlparse
 
 from migradora.config import Settings
 from migradora.gofile_client import GofileClient
 
 url = (sys.argv[1] if len(sys.argv) > 1 else "").strip()
-seconds = int(sys.argv[2]) if len(sys.argv) > 2 else 120
+seconds = int(sys.argv[2]) if len(sys.argv) > 2 else 30
+sample_mib = int(sys.argv[3]) if len(sys.argv) > 3 else 100
+sample_bytes = sample_mib * 1024 * 1024
 
 if not url:
     row = sqlite3.connect("/data/state/queue.db").execute(
@@ -58,49 +79,52 @@ if not settings.gofile_token:
 
 with GofileClient(token=settings.gofile_token, password=settings.gofile_password) as client:
     link = client.resolve_direct_link(url)
+    host = urlparse(link).hostname or "?"
+    print(f"CDN: {link}", file=sys.stderr)
+    if host.startswith("store-na-"):
+        print(
+            f"Note: CDN node {host} is North America — a France VPS may be slow on this route.",
+            file=sys.stderr,
+        )
+    elif host.startswith("store-eu-"):
+        print(f"CDN node {host} looks like EU (good for a France VPS).", file=sys.stderr)
 
-print(f"CDN: {link}", file=sys.stderr)
-print(link)
+    downloaded = 0
+    start = time.monotonic()
+    deadline = start + seconds
+    status = None
+    content_length = None
 
-# Speed test with curl (same as a manual wget/curl download).
-proc = subprocess.run(
-    [
-        "curl",
-        "-L",
-        "--max-time",
-        str(seconds),
-        "-o",
-        "/dev/null",
-        "-w",
-        "%{http_code} %{size_download} %{time_total} %{speed_download}",
-        link,
-    ],
-    capture_output=True,
-    text=True,
-)
-line = (proc.stdout or "").strip()
-if proc.returncode != 0:
-    print(f"curl failed ({proc.returncode}): {proc.stderr or line}", file=sys.stderr)
-    sys.exit(proc.returncode)
+    with client._client.stream("GET", link, follow_redirects=True) as resp:
+        status = resp.status_code
+        content_length = resp.headers.get("content-length")
+        print(f"HTTP {status}", file=sys.stderr)
+        if content_length:
+            print(f"Content-Length: {int(content_length) / (1024**3):.2f} GiB", file=sys.stderr)
+        resp.raise_for_status()
+        for chunk in resp.iter_bytes(chunk_size=1024 * 1024):
+            if not chunk:
+                continue
+            downloaded += len(chunk)
+            if downloaded >= sample_bytes or time.monotonic() >= deadline:
+                break
 
-parts = line.split()
-if len(parts) != 4:
-    print(f"Unexpected curl output: {line!r}", file=sys.stderr)
-    sys.exit(1)
-
-http_code, size_download, time_total, speed_bps = parts
-size_download = int(float(size_download))
-speed_bps = float(speed_bps)
-time_total = float(time_total)
-mb_s = speed_bps / 1024 / 1024
+elapsed = max(time.monotonic() - start, 0.001)
+mb_s = (downloaded / (1024 * 1024)) / elapsed
 
 print(file=sys.stderr)
-print(f"HTTP {http_code}", file=sys.stderr)
-print(f"Downloaded {size_download / (1024**2):.1f} MiB in {time_total:.1f}s", file=sys.stderr)
-print(f"Average speed: {mb_s:.1f} MiB/s ({speed_bps / 1_000_000:.1f} MB/s)", file=sys.stderr)
-if size_download < 1024 * 1024:
+print(f"Sampled {downloaded / (1024**2):.1f} MiB in {elapsed:.1f}s", file=sys.stderr)
+print(f"Average speed: {mb_s:.1f} MiB/s ({mb_s * 8:.0f} Mbps)", file=sys.stderr)
+if downloaded == 0:
     print(
-        "(Short sample — try a larger file or increase --seconds for a better reading.)",
+        "Got 0 bytes — CDN may be rejecting the request or stalling. "
+        "Check migradora logs for the same job.",
+        file=sys.stderr,
+    )
+    sys.exit(1)
+if downloaded < 5 * 1024 * 1024:
+    print(
+        f"(Small sample — try --seconds {seconds * 2} or --mib {sample_mib * 2})",
         file=sys.stderr,
     )
 PY
