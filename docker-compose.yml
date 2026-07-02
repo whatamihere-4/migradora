@@ -8,8 +8,11 @@ services:
     environment:
       DOWNLOAD_DIR: /data/downloads
       WEBUI_PORT: ${WEBUI_PORT:-8080}
-    ports:
-      - "${WEBUI_PORT:-8080}:${WEBUI_PORT:-8080}"
+    networks:
+      default: {}
+      caddy_net:
+        aliases:
+          - migradora
     volumes:
       - ./data/downloads:/data/downloads
       - ./data/state:/data/state
@@ -24,3 +27,7 @@ services:
       timeout: 10s
       retries: 3
       start_period: 30s
+
+networks:
+  caddy_net:
+    external: true

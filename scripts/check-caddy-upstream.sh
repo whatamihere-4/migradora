@@ -18,7 +18,7 @@ if docker inspect migradora-orchestrator >/dev/null 2>&1; then
     echo "caddy_net: attached"
   else
     echo "caddy_net: MISSING — recreate with:"
-    echo "  docker compose -f docker-compose.yml -f docker-compose.caddy.yml up -d --force-recreate"
+    echo "  docker compose up -d --force-recreate"
   fi
 else
   echo "migradora-orchestrator container not found"
@@ -44,5 +44,5 @@ for try in "$HOST" migradora migradora-orchestrator orchestrator; do
 done
 
 echo
-echo "Caddy .env should have: UPSTREAM_3=${HOST}:${PORT}"
+echo "Caddy upstream should be: migradora:${PORT}"
 echo "Migradora .env should have: WEBUI_PORT=${PORT}"

@@ -1,5 +1,5 @@
 #!/bin/sh
-# Check web UI port binding — run on the VPS from repo root.
+# Check web UI inside the container and on caddy_net — run from repo root.
 set -e
 cd "$(dirname "$0")/.."
 
@@ -10,36 +10,35 @@ fi
 PORT="${WEBUI_PORT:-8080}"
 
 echo "=== .env WEBUI_PORT ==="
-echo "WEBUI_PORT=${PORT}"
+echo "WEBUI_PORT=${PORT} (internal only — not published on host)"
 
 echo
-echo "=== Docker compose port map ==="
+echo "=== Docker compose ==="
 docker compose ps -a 2>/dev/null || true
-docker compose port orchestrator "${PORT}" 2>/dev/null || echo "(orchestrator not publishing :${PORT})"
 
 echo
-echo "=== Host listeners ==="
-ss -tlnp 2>/dev/null | grep ":${PORT} " || netstat -tlnp 2>/dev/null | grep ":${PORT} " || echo "Nothing listening on :${PORT}"
+echo "=== Host listeners (should be empty for migradora) ==="
+ss -tlnp 2>/dev/null | grep ":${PORT} " || netstat -tlnp 2>/dev/null | grep ":${PORT} " || echo "Nothing listening on host :${PORT} (expected)"
 
 echo
-echo "=== Local curl ==="
-curl -sf "http://127.0.0.1:${PORT}/health" && echo " OK" || echo "FAIL — app not reachable on 127.0.0.1:${PORT}"
-
-echo
-echo "=== Container env + logs ==="
-docker compose exec -T orchestrator sh -c 'echo WEBUI_PORT=$WEBUI_PORT; curl -sf http://127.0.0.1:${WEBUI_PORT:-8080}/health && echo health OK' 2>/dev/null \
+echo "=== Inside container ==="
+docker compose exec -T orchestrator sh -c \
+  'echo WEBUI_PORT=$WEBUI_PORT; curl -sf http://127.0.0.1:${WEBUI_PORT:-8080}/health && echo health OK' 2>/dev/null \
   || echo "(container not running)"
 
 echo
-echo "=== Tailscale (if installed) ==="
-if command -v tailscale >/dev/null 2>&1; then
-  tailscale serve status 2>/dev/null || true
-  echo "MagicDNS: http://$(tailscale ip -4 2>/dev/null):${PORT}/"
+echo "=== From caddy_net (Caddy upstream) ==="
+if docker network inspect caddy_net >/dev/null 2>&1; then
+  if docker run --rm --network caddy_net curlimages/curl:8.5.0 -sf --max-time 5 \
+    "http://migradora:${PORT}/health" >/dev/null 2>&1; then
+    echo "http://migradora:${PORT}/health OK"
+  else
+    echo "FAIL — Caddy cannot reach migradora:${PORT}"
+    echo "Run: ./scripts/check-caddy-upstream.sh"
+  fi
 else
-  echo "tailscale CLI not found"
+  echo "caddy_net not found — run: docker network create caddy_net"
 fi
 
 echo
-echo "If local curl OK but Tailscale URL fails, update serve/funnel to port ${PORT}:"
-echo "  tailscale serve --bg http://127.0.0.1:${PORT}"
-echo "  # or funnel: tailscale funnel --bg http://127.0.0.1:${PORT}"
+echo "Dashboard URL is via Caddy (not host :${PORT}). See docs/CADDY.md."
