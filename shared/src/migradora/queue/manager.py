@@ -232,6 +232,21 @@ class QueueManager:
                 values,
             )
 
+    def rewind_job(self, job_id: int, *, reason: str = "") -> bool:
+        """Return a job to pending and clear its local path (watchdog / manual retry)."""
+        with self.connection() as conn:
+            cur = conn.execute(
+                """UPDATE files SET status=?, local_path=NULL, last_error=?, updated_at=?
+                   WHERE id=? AND is_part=0""",
+                (
+                    FileStatus.PENDING.value,
+                    reason or None,
+                    utc_now(),
+                    job_id,
+                ),
+            )
+            return cur.rowcount > 0
+
     def mark_failed(self, file_id: int, error: str, retry: bool = True) -> None:
         with self.connection() as conn:
             row = conn.execute("SELECT attempts FROM files WHERE id=?", (file_id,)).fetchone()

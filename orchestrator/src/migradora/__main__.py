@@ -11,6 +11,7 @@ from migradora.config import Settings
 from migradora.discovery.api_discovery import discover_and_enqueue
 from migradora.diagnostics import configure_diag_parser, run_diag_args
 from migradora.filester_probe import configure_probe_parser, run_probe_args
+from migradora.upload_watchdog import configure_watchdog_parser, run_watchdog_args
 from migradora.job_cleanup import clear_all_downloads
 from migradora.logger import setup_logging
 from migradora.models import QueueState
@@ -130,6 +131,11 @@ def main() -> int:
         help="Upload speed vs Filester API call rate (one-shot diagnostics)",
     )
     configure_diag_parser(diag)
+    watchdog = sub.add_parser(
+        "upload-watchdog",
+        help="Check upload speed; exit 2 when host should restart orchestrator",
+    )
+    configure_watchdog_parser(watchdog)
     probe = sub.add_parser("filester-probe", help="Probe Filester folder API")
     configure_probe_parser(probe)
 
@@ -145,6 +151,9 @@ def main() -> int:
 
     if args.command == "diag":
         return run_diag_args(args, settings)
+
+    if args.command == "upload-watchdog":
+        return run_watchdog_args(args, settings)
 
     if args.command == "reset":
         return cmd_reset(settings, yes=args.yes, discover_after=args.discover)

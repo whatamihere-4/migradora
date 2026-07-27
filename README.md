@@ -121,6 +121,7 @@ orchestrator (single container)
 | `./scripts/reset-failed-jobs.sh` | Reset failed/stuck jobs |
 | `./scripts/health-check.sh` | Quick VPS diagnostics |
 | `./scripts/diag-transfer.sh` | Upload speed vs Filester API call rate |
+| `./scripts/upload-watchdog.sh` | Restart orchestrator when upload stays below threshold |
 | `./scripts/check-caddy-upstream.sh` | Verify Caddy can reach `migradora` on `caddy_net` |
 | `./scripts/check-webui-port.sh` | Verify app health inside the container |
 
@@ -161,6 +162,7 @@ Queue state persists in `data/state/queue.db`. Stale `downloading` jobs reset to
 | Queue paused (storage) | Only if you set `FILESTER_STORAGE_PAUSE_PCT` and hit an account cap from the API |
 | Download size mismatch | Re-run job: `./scripts/reset-failed-jobs.sh` |
 | Upload slows to <1 MB/s | Run `./scripts/diag-transfer.sh`; close dashboard tabs; redeploy with `FILESTER_STATS_CACHE_SEC=60` |
+| Upload degrades over time | Enable `UPLOAD_WATCHDOG_ENABLED=true` and run `./scripts/upload-watchdog.sh` in tmux/systemd |
 
 ## License
 
