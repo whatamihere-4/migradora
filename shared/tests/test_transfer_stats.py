@@ -10,7 +10,16 @@ from migradora.transfer_stats import (
     compute_remaining_bytes,
     eta_seconds,
     format_eta,
+    format_speed,
 )
+
+
+class FormatSpeedTests(unittest.TestCase):
+    def test_megabytes(self) -> None:
+        self.assertEqual(format_speed(45 * 1024 * 1024), "45.00 MB/s")
+
+    def test_none(self) -> None:
+        self.assertEqual(format_speed(None), "—")
 
 
 class FormatEtaTests(unittest.TestCase):

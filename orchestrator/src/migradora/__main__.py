@@ -9,6 +9,7 @@ from pathlib import Path
 
 from migradora.config import Settings
 from migradora.discovery.api_discovery import discover_and_enqueue
+from migradora.diagnostics import configure_diag_parser, run_diag_args
 from migradora.filester_probe import configure_probe_parser, run_probe_args
 from migradora.job_cleanup import clear_all_downloads
 from migradora.logger import setup_logging
@@ -124,6 +125,11 @@ def main() -> int:
         help="Run discover immediately after reset",
     )
     sub.add_parser("run", help="Run orchestrator with dashboard")
+    diag = sub.add_parser(
+        "diag",
+        help="Upload speed vs Filester API call rate (one-shot diagnostics)",
+    )
+    configure_diag_parser(diag)
     probe = sub.add_parser("filester-probe", help="Probe Filester folder API")
     configure_probe_parser(probe)
 
@@ -136,6 +142,9 @@ def main() -> int:
 
     if args.command == "filester-probe":
         return run_probe_args(args)
+
+    if args.command == "diag":
+        return run_diag_args(args, settings)
 
     if args.command == "reset":
         return cmd_reset(settings, yes=args.yes, discover_after=args.discover)

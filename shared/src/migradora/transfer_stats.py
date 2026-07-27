@@ -6,6 +6,17 @@ import time
 from dataclasses import dataclass
 
 
+def format_speed(bps: float | None) -> str:
+    """Human-readable throughput (e.g. ``45.2 MB/s``)."""
+    if bps is None or bps <= 0 or bps != bps:
+        return "—"
+    if bps >= 1024**2:
+        return f"{bps / (1024**2):.2f} MB/s"
+    if bps >= 1024:
+        return f"{bps / 1024:.1f} KB/s"
+    return f"{bps:.0f} B/s"
+
+
 def format_eta(seconds: float | None) -> str:
     """Human-readable duration (e.g. ``2h 15m``)."""
     if seconds is None or seconds < 0 or seconds != seconds:  # NaN

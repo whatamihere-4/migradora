@@ -506,6 +506,37 @@ class QueueManager:
             )
             return cur.rowcount
 
+    def bandwidth_log_stats(
+        self,
+        source: str = "filester",
+        windows_min: tuple[int, ...] = (1, 5, 15),
+    ) -> dict[str, Any]:
+        """Count recent bandwidth_log rows and derive calls-per-minute."""
+        from datetime import datetime, timedelta
+
+        def cutoff(minutes: int) -> str:
+            return (datetime.utcnow() - timedelta(minutes=minutes)).isoformat() + "Z"
+
+        with self.connection() as conn:
+            total_row = conn.execute(
+                "SELECT COUNT(*) AS n FROM bandwidth_log WHERE source=?",
+                (source,),
+            ).fetchone()
+            total = int(total_row["n"]) if total_row else 0
+            windows: dict[str, dict[str, float | int]] = {}
+            for minutes in windows_min:
+                row = conn.execute(
+                    """SELECT COUNT(*) AS n FROM bandwidth_log
+                       WHERE source=? AND timestamp >= ?""",
+                    (source, cutoff(minutes)),
+                ).fetchone()
+                count = int(row["n"]) if row else 0
+                windows[str(minutes)] = {
+                    "count": count,
+                    "per_min": round(count / minutes, 2) if minutes > 0 else float(count),
+                }
+            return {"total_rows": total, "windows": windows}
+
     def _is_running(self, conn: sqlite3.Connection) -> bool:
         row = conn.execute("SELECT state FROM queue_control WHERE id=1").fetchone()
         if not row:
