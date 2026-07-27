@@ -2,7 +2,7 @@
 # Monitor upload speed and restart orchestrator when it stays below threshold.
 #
 # Configure in .env:
-#   UPLOAD_WATCHDOG_ENABLED=true
+#   UPLOAD_WATCHDOG_ENABLED=true   # True/TRUE also accepted
 #   UPLOAD_WATCHDOG_MIN_MBPS=5
 #   UPLOAD_WATCHDOG_SUSTAIN_SEC=60
 #   UPLOAD_WATCHDOG_POLL_SEC=10
@@ -43,9 +43,9 @@ if [ -f .env ]; then
   set +a
 fi
 
-enabled="${UPLOAD_WATCHDOG_ENABLED:-false}"
+enabled=$(printf '%s' "${UPLOAD_WATCHDOG_ENABLED:-false}" | tr '[:upper:]' '[:lower:]')
 case "$enabled" in
-  true|1|yes|on|TRUE|YES|ON) ;;
+  true|1|yes|on) ;;
   *)
     echo "Upload watchdog disabled (UPLOAD_WATCHDOG_ENABLED=$enabled)"
     exit 0
