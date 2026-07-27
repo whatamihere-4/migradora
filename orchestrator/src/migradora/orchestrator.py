@@ -54,6 +54,9 @@ class Orchestrator:
                     logger.info("Disk space recovered (%.1f GB free), resuming", free_gb)
 
             self.filester_monitor.check_and_pause()
+            pruned = self.queue.prune_bandwidth_log()
+            if pruned:
+                logger.info("Pruned %d old bandwidth_log row(s)", pruned)
             self._stop.wait(interval)
 
     def start_background(self) -> list[threading.Thread]:

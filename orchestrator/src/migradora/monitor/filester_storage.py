@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 import logging
+import threading
+import time
 from typing import Any
 
 import httpx
@@ -18,8 +20,23 @@ class FilesterStorageMonitor:
     def __init__(self, settings: Settings, queue: QueueManager) -> None:
         self.settings = settings
         self.queue = queue
+        self._cache_lock = threading.Lock()
+        self._cached_stats: dict[str, Any] | None = None
+        self._cached_at: float = 0.0
 
-    def fetch_storage_stats(self) -> dict[str, Any]:
+    def get_storage_stats(self, *, force: bool = False) -> dict[str, Any]:
+        """Return cached Filester account stats without extra API calls."""
+        ttl = self.settings.filester_stats_cache_sec
+        with self._cache_lock:
+            if (
+                not force
+                and self._cached_stats is not None
+                and (time.time() - self._cached_at) < ttl
+            ):
+                return dict(self._cached_stats)
+        return self.fetch_storage_stats(log=False)
+
+    def fetch_storage_stats(self, *, log: bool = True) -> dict[str, Any]:
         if not self.settings.filester_api_key:
             return {"error": "FILESTER_API_KEY not configured"}
 
@@ -47,19 +64,23 @@ class FilesterStorageMonitor:
                     "api_requests_today": account.get("api_requests_today"),
                     "raw": account,
                 }
-                self.queue.log_bandwidth(
-                    traffic_bytes=None,
-                    storage_bytes=used,
-                    source="filester",
-                    raw=result,
-                )
+                with self._cache_lock:
+                    self._cached_stats = result
+                    self._cached_at = time.time()
+                if log:
+                    self.queue.log_bandwidth(
+                        traffic_bytes=None,
+                        storage_bytes=used,
+                        source="filester",
+                        raw=result,
+                    )
                 return result
         except Exception as exc:
             logger.error("Failed to fetch Filester storage: %s", exc)
             return {"error": str(exc)}
 
     def check_and_pause(self) -> dict[str, Any]:
-        stats = self.fetch_storage_stats()
+        stats = self.fetch_storage_stats(log=True)
         used = stats.get("storage_used_bytes")
         limit = stats.get("storage_limit_bytes")
         pause_pct = self.settings.filester_storage_pause_pct

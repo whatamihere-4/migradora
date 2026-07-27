@@ -338,6 +338,7 @@ class PipelineCoordinator:
                 self._upload_bytes_done = part_base_done + part_size
                 cleanup_dir(part_path)
                 logger.info("Uploaded -> https://filester.me/d/%s", slug)
+                filester.reset_connections()
 
             if was_split:
                 organize_split_parts_into_folder(

@@ -83,7 +83,7 @@ def create_app(settings: Settings, orchestrator: Orchestrator) -> FastAPI:
     def status() -> dict[str, Any]:
         stats = queue.get_stats()
         state, pause_reason = queue.get_queue_state()
-        filester_stats = orchestrator.filester_monitor.fetch_storage_stats()
+        filester_stats = orchestrator.filester_monitor.get_storage_stats()
         pipeline = orchestrator.pipeline.status
         current_job = None
         current_job_size = 0

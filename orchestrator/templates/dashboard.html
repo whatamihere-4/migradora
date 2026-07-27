@@ -350,7 +350,7 @@
           phaseLabel + progLabel + speedLabel + etaLabel + queueEtaLabel + avgSpeedLabel;
         renderJobs(jobsResp.jobs || [], p, status.current_job, eta);
         const active = (st.downloading||0) + (st.uploading||0);
-        scheduleRefresh(active > 0 ? 1500 : 4000);
+        scheduleRefresh(active > 0 ? 5000 : 4000);
       } catch (e) {
         document.getElementById('jobs-list').innerHTML = `<div class="empty">Error: ${esc(e.message)}</div>`;
         scheduleRefresh(5000);

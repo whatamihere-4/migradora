@@ -486,6 +486,26 @@ class QueueManager:
             ).fetchone()
             return row_to_dict(row)
 
+    def prune_bandwidth_log(self, *, keep_rows: int = 500) -> int:
+        """Drop old bandwidth_log rows, keeping the most recent ``keep_rows``."""
+        with self.connection() as conn:
+            row = conn.execute("SELECT COUNT(*) AS n FROM bandwidth_log").fetchone()
+            total = int(row["n"]) if row else 0
+            if total <= keep_rows:
+                return 0
+            cutoff = conn.execute(
+                """SELECT id FROM bandwidth_log
+                   ORDER BY id DESC LIMIT 1 OFFSET ?""",
+                (keep_rows - 1,),
+            ).fetchone()
+            if not cutoff:
+                return 0
+            cur = conn.execute(
+                "DELETE FROM bandwidth_log WHERE id < ?",
+                (cutoff["id"],),
+            )
+            return cur.rowcount
+
     def _is_running(self, conn: sqlite3.Connection) -> bool:
         row = conn.execute("SELECT state FROM queue_control WHERE id=1").fetchone()
         if not row:

@@ -103,13 +103,24 @@ class FilesterClient:
         self.api_base = api_base.rstrip("/")
         self.max_retries = max_retries
         self.retry_delay = retry_delay
-        self._client = httpx.Client(
-            base_url=self.api_base,
-            headers={"Authorization": f"Bearer {api_key}"},
-            timeout=httpx.Timeout(600.0, connect=30.0),
-        )
+        self._api_key = api_key
+        self._client = self._make_client()
         self._folder_index: FolderIndex | None = None
         self._nested_folder_cache: dict[tuple[str, str], FilesterFolder] = {}
+
+    def _make_client(self) -> httpx.Client:
+        # Fresh TCP per request avoids stale keep-alive sockets on long uploads.
+        return httpx.Client(
+            base_url=self.api_base,
+            headers={"Authorization": f"Bearer {self._api_key}"},
+            timeout=httpx.Timeout(600.0, connect=30.0),
+            limits=httpx.Limits(max_keepalive_connections=0, max_connections=10),
+        )
+
+    def reset_connections(self) -> None:
+        """Drop pooled connections between large upload parts."""
+        self._client.close()
+        self._client = self._make_client()
 
     def close(self) -> None:
         self._client.close()
