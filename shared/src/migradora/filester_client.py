@@ -99,21 +99,30 @@ class FilesterClient:
         api_base: str = "https://u1.filester.me",
         max_retries: int = 5,
         retry_delay: int = 30,
+        upload_chunk_bytes: int = 1024 * 1024,
+        upload_write_timeout_sec: int = 120,
     ) -> None:
         self.api_base = api_base.rstrip("/")
         self.max_retries = max_retries
         self.retry_delay = retry_delay
         self._api_key = api_key
+        self._upload_chunk_bytes = max(64 * 1024, upload_chunk_bytes)
+        self._upload_write_timeout_sec = max(30, upload_write_timeout_sec)
         self._client = self._make_client()
         self._folder_index: FolderIndex | None = None
         self._nested_folder_cache: dict[tuple[str, str], FilesterFolder] = {}
 
     def _make_client(self) -> httpx.Client:
         # Fresh TCP per request avoids stale keep-alive sockets on long uploads.
+        # write timeout: retry when the socket stops accepting data (frozen connection).
         return httpx.Client(
             base_url=self.api_base,
             headers={"Authorization": f"Bearer {self._api_key}"},
-            timeout=httpx.Timeout(600.0, connect=30.0),
+            timeout=httpx.Timeout(
+                600.0,
+                connect=30.0,
+                write=float(self._upload_write_timeout_sec),
+            ),
             limits=httpx.Limits(max_keepalive_connections=0, max_connections=10),
         )
 
@@ -756,7 +765,12 @@ class FilesterClient:
                 with open(file_path, "rb") as raw_fh:
                     fh: Any = raw_fh
                     if on_progress:
-                        fh = _ProgressReader(raw_fh, total_size, on_progress)
+                        fh = _ProgressReader(
+                            raw_fh,
+                            total_size,
+                            on_progress,
+                            chunk_bytes=self._upload_chunk_bytes,
+                        )
                     files = {"file": (file_path.name, fh, "application/octet-stream")}
                     resp = self._client.post("/api/v1/upload", files=files, headers=headers)
                 if resp.status_code == 429:
@@ -767,6 +781,7 @@ class FilesterClient:
             except (httpx.HTTPStatusError, httpx.TimeoutException, httpx.NetworkError) as exc:
                 if attempt < self.max_retries:
                     logger.warning("Upload attempt %d failed: %s", attempt + 1, exc)
+                    self.reset_connections()
                     time.sleep(self.retry_delay)
                     continue
                 raise
@@ -800,13 +815,18 @@ class _ProgressReader:
         file_obj: Any,
         total_size: int,
         on_progress: Callable[[int, int], None],
+        *,
+        chunk_bytes: int = 1024 * 1024,
     ) -> None:
         self._file_obj = file_obj
         self._total_size = total_size
         self._on_progress = on_progress
+        self._chunk_bytes = max(64 * 1024, chunk_bytes)
         self._done = 0
 
     def read(self, size: int = -1) -> bytes:
+        if size < 0 or size > self._chunk_bytes:
+            size = self._chunk_bytes
         chunk = self._file_obj.read(size)
         if chunk:
             self._done += len(chunk)
@@ -817,7 +837,7 @@ class _ProgressReader:
         return self
 
     def __next__(self) -> bytes:
-        chunk = self.read(65536)
+        chunk = self.read(self._chunk_bytes)
         if not chunk:
             raise StopIteration
         return chunk

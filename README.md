@@ -117,6 +117,7 @@ orchestrator (single container)
 |--------|---------|
 | `./scripts/test-gofile-resolve.sh [url]` | Test API token (folder list or file resolve) |
 | `./scripts/test-gofile-download-speed.sh [url]` | Resolve CDN link + speed test (`--probe-servers` benchmarks mirrors) |
+| `./scripts/test-filester-upload-speed.sh` | Measure raw VPS→Filester upload throughput |
 | `./scripts/reset-failed-jobs.sh` | Reset failed/stuck jobs |
 | `./scripts/health-check.sh` | Quick VPS diagnostics |
 | `./scripts/diag-transfer.sh` | Upload speed vs Filester API call rate |

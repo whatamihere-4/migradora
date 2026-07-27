@@ -93,6 +93,8 @@ class Settings:
     # Filester account storage guard (0 = disabled; Filester limit is per-file not per-account)
     filester_storage_pause_pct: float = 0.0
     filester_stats_cache_sec: int = 60
+    filester_upload_chunk_bytes: int = 1024 * 1024
+    filester_upload_write_timeout_sec: int = 120
 
     # Web dashboard
     webui_port: int = 8080
@@ -158,6 +160,12 @@ class Settings:
             discovery_delay_sec=float(_env("DISCOVERY_DELAY_SEC", "2")),
             filester_storage_pause_pct=float(_env("FILESTER_STORAGE_PAUSE_PCT", "0")),
             filester_stats_cache_sec=max(10, _env_int("FILESTER_STATS_CACHE_SEC", 60)),
+            filester_upload_chunk_bytes=max(
+                64 * 1024, _env_int("FILESTER_UPLOAD_CHUNK_BYTES", 1024 * 1024)
+            ),
+            filester_upload_write_timeout_sec=max(
+                30, _env_int("FILESTER_UPLOAD_WRITE_TIMEOUT_SEC", 120)
+            ),
             webui_port=_webui_port(),
             dashboard_host=_env("DASHBOARD_HOST", "0.0.0.0"),
             log_level=_env("LOG_LEVEL", "INFO"),

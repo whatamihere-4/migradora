@@ -71,6 +71,15 @@ class PipelineCoordinator:
         self._skip_job_id: int | None = None
         self._transfer = TransferTracker()
 
+    def _touch_job_progress(self, job_id: int) -> None:
+        """Keep stale-job detection and health heartbeats fresh during long transfers."""
+        now = time.time()
+        if now - self._last_touch_at < 30:
+            return
+        self._last_touch_at = now
+        write_heartbeat(self.settings.state_dir)
+        self.queue.touch_file(job_id)
+
     @property
     def status(self) -> dict:
         phase = self._current_phase
@@ -226,10 +235,7 @@ class PipelineCoordinator:
             if total:
                 self._progress_total = total
             self._transfer.update_progress("download", done)
-            now = time.time()
-            if now - self._last_touch_at >= 30:
-                self._last_touch_at = now
-                self.queue.touch_file(job.id)
+            self._touch_job_progress(job.id)
 
         with GofileClient(
             token=self.settings.gofile_token,
@@ -278,6 +284,8 @@ class PipelineCoordinator:
             self.settings.filester_api_base,
             max_retries=self.settings.upload_max_retries,
             retry_delay=self.settings.upload_retry_delay_sec,
+            upload_chunk_bytes=self.settings.filester_upload_chunk_bytes,
+            upload_write_timeout_sec=self.settings.filester_upload_write_timeout_sec,
         ) as filester:
             folder_id = ensure_filester_folder_path(
                 filester,
@@ -322,6 +330,7 @@ class PipelineCoordinator:
                     cumulative = part_base_done + done
                     self._upload_bytes_done = cumulative
                     self._transfer.update_progress("upload", cumulative)
+                    self._touch_job_progress(job.id)
 
                 result = filester.upload_file(
                     part_path,
