@@ -1,7 +1,8 @@
 """Split oversized media into watchable parts via ffmpeg stream-copy (one part at a time).
 
 Parts are named ``<name>.PART1.<ext>``, ``<name>.PART2.<ext>`` … and each is
-independently playable. Rejoin losslessly with the concat demuxer::
+independently playable. Splits are aligned to video keyframes so parts rejoin
+losslessly with the concat demuxer::
 
     ffmpeg -f concat -safe 0 -i list.txt -c copy movie.mkv
 """
@@ -19,6 +20,7 @@ from pathlib import Path
 logger = logging.getLogger("migradora.ffmpeg_splitter")
 
 _TARGET_FACTORS = (0.90, 0.75, 0.60)
+_KEYFRAME_EPS = 0.001
 
 
 class SplitError(RuntimeError):
@@ -52,6 +54,92 @@ def probe_duration(path: str | Path, *, ffprobe_bin: str = "ffprobe") -> float:
             f"cannot split {Path(path).name}"
         )
     return dur
+
+
+def probe_keyframe_times(path: str | Path, *, ffprobe_bin: str = "ffprobe") -> list[float]:
+    """Return sorted presentation timestamps of video keyframes."""
+    proc = subprocess.run(
+        [
+            ffprobe_bin,
+            "-v",
+            "error",
+            "-skip_frame",
+            "nokey",
+            "-select_streams",
+            "v:0",
+            "-show_entries",
+            "frame=pkt_pts_time",
+            "-of",
+            "csv=p=0",
+            str(path),
+        ],
+        capture_output=True,
+        text=True,
+        timeout=3600,
+    )
+    if proc.returncode != 0:
+        tail = (proc.stderr or "")[-400:]
+        raise SplitError(f"ffprobe keyframe scan failed for {Path(path).name}: {tail}")
+
+    times: list[float] = []
+    for line in (proc.stdout or "").splitlines():
+        line = line.strip()
+        if not line:
+            continue
+        try:
+            t = float(line)
+        except ValueError:
+            continue
+        if t >= -_KEYFRAME_EPS:
+            times.append(t)
+
+    if not times:
+        raise SplitError(f"No video keyframes found in {Path(path).name}")
+
+    return sorted(set(times))
+
+
+def plan_keyframe_part_starts(
+    keyframes: list[float],
+    duration: float,
+    target_segment_time: float,
+) -> list[float]:
+    """Return part start times ``[0, kf1, kf2, ...]`` on keyframe boundaries.
+
+  Each part runs from one start time to the next (or ``duration`` for the last
+  part). Every non-zero start is a keyframe so parts are playable on their own
+  and concat with ``-c copy`` without overlap.
+    """
+    if duration <= 0:
+        return [0.0]
+
+    kf = sorted(set(keyframes))
+    if kf[0] > _KEYFRAME_EPS:
+        kf = [0.0, *kf]
+
+    starts = [0.0]
+    while starts[-1] < duration - _KEYFRAME_EPS:
+        target = starts[-1] + max(1.0, target_segment_time)
+        if target >= duration - _KEYFRAME_EPS:
+            break
+
+        candidates = [t for t in kf if t >= target - _KEYFRAME_EPS]
+        if not candidates:
+            break
+
+        next_start = candidates[0]
+        if next_start <= starts[-1] + _KEYFRAME_EPS:
+            later = [t for t in kf if t > starts[-1] + _KEYFRAME_EPS]
+            if not later:
+                break
+            next_start = later[0]
+
+        if next_start >= duration - _KEYFRAME_EPS:
+            break
+
+        starts.append(next_start)
+
+    return starts
 
 
 def _copy_stream_maps() -> list[str]:
@@ -153,33 +241,50 @@ def _extract_single_segment(
     path: str | Path,
     output_path: str | Path,
     start_sec: float,
-    duration_sec: float,
+    end_sec: float,
     *,
     ffmpeg_bin: str,
     timeout: int,
     skip_check: Callable[[], None] | None = None,
 ) -> None:
+    """Stream-copy ``[start_sec, end_sec)`` from ``path``.
+
+    ``-ss`` is placed after ``-i`` so stream-copy seeks to the exact keyframe
+    start time instead of snapping to an earlier keyframe (which overlaps parts).
+    """
+    duration_sec = end_sec - start_sec
+    if duration_sec <= _KEYFRAME_EPS:
+        raise SplitError(
+            f"Refusing zero-length segment for {Path(output_path).name} "
+            f"({start_sec:.3f}s–{end_sec:.3f}s)"
+        )
+
     cmd = [
         ffmpeg_bin,
         "-hide_banner",
         "-y",
-        "-ss",
-        str(max(0.0, start_sec)),
         "-i",
         str(path),
+    ]
+    if start_sec > _KEYFRAME_EPS:
+        cmd += ["-ss", str(start_sec)]
+    cmd += [
         "-t",
-        str(max(0.001, duration_sec)),
+        str(duration_sec),
         *_copy_stream_maps(),
         "-c",
         "copy",
         "-reset_timestamps",
         "1",
+        "-avoid_negative_ts",
+        "make_zero",
         str(output_path),
     ]
     logger.info(
-        "ffmpeg slice %s @ %.1fs for %.1fs",
+        "ffmpeg slice %s @ %.3fs–%.3fs (%.3fs)",
         Path(output_path).name,
         start_sec,
+        end_sec,
         duration_sec,
     )
     _run_ffmpeg_logged(cmd, timeout=timeout, skip_check=skip_check)
@@ -221,10 +326,11 @@ def iter_upload_parts_sliced(
     stem = source.stem
     ext = source.suffix
     duration = probe_duration(source, ffprobe_bin=ffprobe_bin)
+    keyframes = probe_keyframe_times(source, ffprobe_bin=ffprobe_bin)
     bytes_per_sec = size / duration
 
     segment_time = None
-    num_parts = None
+    part_starts = None
     last_err = None
     for factor in _TARGET_FACTORS:
         if skip_check:
@@ -232,15 +338,20 @@ def iter_upload_parts_sliced(
 
         target_bytes = int(part_size_bytes * factor)
         trial_segment_time = max(1, int(target_bytes / bytes_per_sec))
-        trial_num_parts = max(1, math.ceil(duration / trial_segment_time))
+        trial_starts = plan_keyframe_part_starts(
+            keyframes, duration, trial_segment_time
+        )
         probe_path = output_dir / f"{stem}.PART1{ext}"
         probe_path.unlink(missing_ok=True)
 
+        first_end = (
+            trial_starts[1] if len(trial_starts) > 1 else duration
+        )
         _extract_single_segment(
             source,
             probe_path,
             0,
-            trial_segment_time,
+            first_end,
             ffmpeg_bin=ffmpeg_bin,
             timeout=ffmpeg_timeout,
             skip_check=skip_check,
@@ -257,29 +368,29 @@ def iter_upload_parts_sliced(
             continue
 
         segment_time = trial_segment_time
-        num_parts = trial_num_parts
+        part_starts = trial_starts
         logger.info(
-            "ffmpeg per-part slice: %d part(s), ~%ds each (factor %s)",
-            num_parts,
+            "ffmpeg keyframe-aligned slice: %d part(s), ~%ds target (factor %s)",
+            len(trial_starts),
             segment_time,
             factor,
         )
         break
 
-    if segment_time is None or num_parts is None:
+    if segment_time is None or part_starts is None:
         raise SplitError(
             f"Unable to slice {source.name} under {part_size_bytes:,} bytes. Last: {last_err}"
         )
 
     original = source.name
-    for idx in range(num_parts):
+    num_parts = len(part_starts)
+    for idx, start in enumerate(part_starts):
         if skip_check:
             skip_check()
 
-        start = idx * segment_time
-        seg_dur = min(segment_time, duration - start)
-        if seg_dur <= 0:
-            break
+        end = part_starts[idx + 1] if idx + 1 < num_parts else duration
+        if end - start <= _KEYFRAME_EPS:
+            continue
 
         part_name = f"{stem}.PART{idx + 1}{ext}"
         part_path = output_dir / part_name
@@ -287,7 +398,7 @@ def iter_upload_parts_sliced(
             source,
             part_path,
             start,
-            seg_dur,
+            end,
             ffmpeg_bin=ffmpeg_bin,
             timeout=ffmpeg_timeout,
             skip_check=skip_check,
