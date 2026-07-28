@@ -158,7 +158,7 @@ Queue state persists in `data/state/queue.db`. Stale `downloading` jobs reset to
 | `GOFILE_TOKEN is required` | Set token from premium account in `.env`, rebuild |
 | `error-notPremium` | Token account needs active premium (subscription or PAYG with credits) |
 | Discover finds 0 files | Check folder is shared; test with `test-gofile-resolve.sh` |
-| Queue paused (disk) | Free space under `data/downloads` |
+| Queue paused (disk) | Free space under `data/downloads`, or set `DISK_PAUSE_SKIP_JOB=true` to skip oversized jobs and continue |
 | Queue paused (storage) | Only if you set `FILESTER_STORAGE_PAUSE_PCT` and hit an account cap from the API |
 | Download size mismatch | Re-run job: `./scripts/reset-failed-jobs.sh` |
 | Upload slows to <1 MB/s | Run `./scripts/diag-transfer.sh`; close dashboard tabs; redeploy with `FILESTER_STATS_CACHE_SEC=60` |

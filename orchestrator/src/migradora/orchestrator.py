@@ -46,12 +46,21 @@ class Orchestrator:
 
             state, _ = self.queue.get_queue_state()
             if state == QueueState.PAUSED_DISK:
-                from migradora.utils import free_disk_gb
+                if self.settings.disk_pause_skip_job:
+                    self.queue.set_queue_state(
+                        QueueState.RUNNING,
+                        "DISK_PAUSE_SKIP_JOB skips jobs instead of pausing",
+                    )
+                    logger.info(
+                        "Queue was paused_disk; resumed because DISK_PAUSE_SKIP_JOB is enabled"
+                    )
+                else:
+                    from migradora.utils import free_disk_gb
 
-                free_gb = free_disk_gb(self.settings.download_dir)
-                if free_gb >= self.settings.min_free_disk_gb:
-                    self.queue.set_queue_state(QueueState.RUNNING, "")
-                    logger.info("Disk space recovered (%.1f GB free), resuming", free_gb)
+                    free_gb = free_disk_gb(self.settings.download_dir)
+                    if free_gb >= self.settings.min_free_disk_gb:
+                        self.queue.set_queue_state(QueueState.RUNNING, "")
+                        logger.info("Disk space recovered (%.1f GB free), resuming", free_gb)
 
             self.filester_monitor.check_and_pause()
             pruned = self.queue.prune_bandwidth_log()

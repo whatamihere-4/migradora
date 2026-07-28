@@ -82,6 +82,7 @@ class Settings:
     # Limits
     min_free_disk_gb: int = 5
     disk_budget_gb: int = 0
+    disk_pause_skip_job: bool = False
     max_source_file_bytes: int = 0
     auto_skip_oversized: bool = True
     verify_hash: bool = False
@@ -157,6 +158,7 @@ class Settings:
             db_path=_env("DB_PATH", f"{state_dir}/queue.db"),
             min_free_disk_gb=_env_int("MIN_FREE_DISK_GB", 5),
             disk_budget_gb=_env_int("DISK_BUDGET_GB", 0),
+            disk_pause_skip_job=_env_bool("DISK_PAUSE_SKIP_JOB", False),
             max_source_file_bytes=_env_int("MAX_SOURCE_FILE_BYTES", 0)
             or int(float(_env("MAX_SOURCE_FILE_GB") or "0") * 1024**3),
             auto_skip_oversized=_env_bool("AUTO_SKIP_OVERSIZED", True),

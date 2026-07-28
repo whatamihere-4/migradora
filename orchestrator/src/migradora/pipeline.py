@@ -136,6 +136,14 @@ class PipelineCoordinator:
         self._upload_bytes_total = 0
         logger.info("Job %d skipped; local files removed", job_id)
 
+    def _skip_job_for_disk(self, job, reason: str) -> None:
+        cleanup_job_files(self.settings, job.id, job.local_path)
+        self.queue.mark_skipped(job.id, reason)
+        self._current_phase = "idle"
+        self._current_job_id = None
+        self._current_job_name = ""
+        logger.warning("Skipped job %d (disk): %s", job.id, reason)
+
     def run_loop(self) -> None:
         logger.info("Pipeline started")
         while not self._stop.is_set():
@@ -147,16 +155,32 @@ class PipelineCoordinator:
 
             state, _ = self.queue.get_queue_state()
             if state != QueueState.RUNNING:
-                self._current_phase = f"paused:{state.value}"
-                time.sleep(self.settings.worker_poll_interval_sec)
-                continue
+                if (
+                    state == QueueState.PAUSED_DISK
+                    and self.settings.disk_pause_skip_job
+                ):
+                    self.queue.set_queue_state(
+                        QueueState.RUNNING,
+                        "DISK_PAUSE_SKIP_JOB skips jobs instead of pausing",
+                    )
+                else:
+                    self._current_phase = f"paused:{state.value}"
+                    time.sleep(self.settings.worker_poll_interval_sec)
+                    continue
 
             if free_disk_gb(self.settings.download_dir) < self.settings.min_free_disk_gb:
-                self.queue.set_queue_state(
-                    QueueState.PAUSED_DISK,
-                    f"Free disk below {self.settings.min_free_disk_gb} GB",
-                )
-                continue
+                if self.settings.disk_pause_skip_job:
+                    logger.warning(
+                        "Free disk below %s GB; DISK_PAUSE_SKIP_JOB enabled — "
+                        "continuing (oversized jobs will be skipped)",
+                        self.settings.min_free_disk_gb,
+                    )
+                else:
+                    self.queue.set_queue_state(
+                        QueueState.PAUSED_DISK,
+                        f"Free disk below {self.settings.min_free_disk_gb} GB",
+                    )
+                    continue
 
             job = self.queue.claim_pending_job()
             if not job:
@@ -204,11 +228,15 @@ class PipelineCoordinator:
             need_gb = required_disk_gb(job.size_bytes, self.settings)
             free_gb = free_disk_gb(self.settings.download_dir)
             if free_gb < need_gb:
-                self.queue.update_file(job.id, status=FileStatus.PENDING)
-                self.queue.set_queue_state(
-                    QueueState.PAUSED_DISK,
-                    f"Need ~{need_gb:.0f} GB free for {job.filename} ({free_gb:.1f} GB available)",
+                reason = (
+                    f"Insufficient disk: need ~{need_gb:.0f} GB for {job.filename} "
+                    f"({free_gb:.1f} GB available)"
                 )
+                if self.settings.disk_pause_skip_job:
+                    self._skip_job_for_disk(job, reason)
+                    return
+                self.queue.update_file(job.id, status=FileStatus.PENDING)
+                self.queue.set_queue_state(QueueState.PAUSED_DISK, reason)
                 self._current_phase = "idle"
                 self._current_job_id = None
                 self._current_job_name = ""
