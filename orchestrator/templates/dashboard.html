@@ -134,6 +134,7 @@
         <button class="btn" id="btn-resume">Resume</button>
         <button class="btn secondary" id="btn-pause">Pause</button>
         <button class="btn secondary" id="btn-retry">Retry failed</button>
+        <button class="btn secondary" id="btn-retry-disk" title="Re-queue jobs skipped for insufficient disk only">Retry disk-skipped</button>
         <button class="btn secondary" id="btn-discover">Discover</button>
       </div>
     </div>
@@ -349,6 +350,12 @@
         document.getElementById('pipeline-meta').innerHTML =
           phaseLabel + progLabel + speedLabel + etaLabel + queueEtaLabel + avgSpeedLabel;
         renderJobs(jobsResp.jobs || [], p, status.current_job, eta);
+        const diskSkipped = st.disk_skipped || 0;
+        const retryDiskBtn = document.getElementById('btn-retry-disk');
+        retryDiskBtn.disabled = diskSkipped === 0;
+        retryDiskBtn.textContent = diskSkipped
+          ? `Retry disk-skipped (${diskSkipped})`
+          : 'Retry disk-skipped';
         const active = (st.downloading||0) + (st.uploading||0);
         scheduleRefresh(active > 0 ? 5000 : 4000);
       } catch (e) {
@@ -360,6 +367,15 @@
     document.getElementById('btn-resume').onclick = async () => { await post('/resume'); refresh(); };
     document.getElementById('btn-pause').onclick = async () => { await post('/pause'); refresh(); };
     document.getElementById('btn-retry').onclick = async () => { await post('/retry-failed'); refresh(); };
+    document.getElementById('btn-retry-disk').onclick = async () => {
+      if (!confirm(
+        'Re-queue jobs skipped for insufficient disk only?\n\n'
+        + 'Jobs skipped as too large for the VPS disk budget are not affected.'
+      )) return;
+      const res = await post('/retry-disk-skipped');
+      alert(`Re-queued ${res.reset || 0} job(s)`);
+      refresh();
+    };
     document.getElementById('btn-discover').onclick = async () => {
       const btn = document.getElementById('btn-discover');
       btn.disabled = true;

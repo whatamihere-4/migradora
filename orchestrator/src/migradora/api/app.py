@@ -140,6 +140,7 @@ def create_app(settings: Settings, orchestrator: Orchestrator) -> FastAPI:
                 "uploaded": stats.uploaded,
                 "failed": stats.failed,
                 "skipped": stats.skipped,
+                "disk_skipped": queue.count_disk_skipped_jobs(),
                 "completion_pct": round(stats.completion_pct, 2),
                 "total_bytes": stats.total_bytes,
                 "uploaded_bytes": stats.uploaded_bytes,
@@ -171,6 +172,12 @@ def create_app(settings: Settings, orchestrator: Orchestrator) -> FastAPI:
         active = queue.reset_active_jobs(exclude_ids=exclude)
         orchestrator.resume()
         return {"status": "ok", "reset": count, "reset_active": active}
+
+    @app.post("/retry-disk-skipped")
+    def retry_disk_skipped() -> dict[str, Any]:
+        count = queue.reset_disk_skipped_jobs()
+        orchestrator.resume()
+        return {"status": "ok", "reset": count}
 
     @app.post("/pause")
     def pause() -> dict[str, str]:

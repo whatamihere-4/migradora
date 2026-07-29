@@ -14,7 +14,11 @@ from migradora.gofile_client import GofileClient
 from migradora.models import FileStatus, QueueState
 from migradora.queue.manager import QueueManager
 from migradora.splitter import iter_upload_parts
-from migradora.size_limits import oversize_skip_reason, required_disk_gb
+from migradora.size_limits import (
+    disk_insufficient_skip_reason,
+    oversize_skip_reason,
+    required_disk_gb,
+)
 from migradora.transfer_stats import TransferTracker, eta_seconds
 from migradora.utils import free_disk_gb
 
@@ -228,9 +232,8 @@ class PipelineCoordinator:
             need_gb = required_disk_gb(job.size_bytes, self.settings)
             free_gb = free_disk_gb(self.settings.download_dir)
             if free_gb < need_gb:
-                reason = (
-                    f"Insufficient disk: need ~{need_gb:.0f} GB for {job.filename} "
-                    f"({free_gb:.1f} GB available)"
+                reason = disk_insufficient_skip_reason(
+                    job.filename, need_gb, free_gb
                 )
                 if self.settings.disk_pause_skip_job:
                     self._skip_job_for_disk(job, reason)

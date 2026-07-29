@@ -8,6 +8,28 @@ from migradora.utils import free_disk_gb
 
 _GIB = 1024**3
 
+DISK_INSUFFICIENT_PREFIX = "Insufficient disk:"
+OVERSIZE_BUDGET_PREFIX = "File too large for VPS disk budget"
+
+
+def disk_insufficient_skip_reason(
+    filename: str,
+    need_gb: float,
+    free_gb: float,
+) -> str:
+    return (
+        f"{DISK_INSUFFICIENT_PREFIX} need ~{need_gb:.0f} GB for {filename} "
+        f"({free_gb:.1f} GB available)"
+    )
+
+
+def is_disk_insufficient_skip_reason(reason: str | None) -> bool:
+    return bool(reason and reason.startswith(DISK_INSUFFICIENT_PREFIX))
+
+
+def is_oversize_budget_skip_reason(reason: str | None) -> bool:
+    return bool(reason and reason.startswith(OVERSIZE_BUDGET_PREFIX))
+
 
 def max_processable_source_bytes(settings: Settings, *, free_gb: float | None = None) -> int:
     """
@@ -51,7 +73,7 @@ def oversize_skip_reason(file_size: int, settings: Settings) -> str | None:
         return "File size unknown or disk budget too small"
     if file_size > limit:
         return (
-            f"File too large for VPS disk budget "
+            f"{OVERSIZE_BUDGET_PREFIX} "
             f"({file_size / _GIB:.1f} GiB > {limit / _GIB:.1f} GiB max)"
         )
     return None

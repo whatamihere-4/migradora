@@ -289,6 +289,36 @@ class QueueManager:
             )
             return cur.rowcount
 
+    def count_disk_skipped_jobs(self) -> int:
+        from migradora.size_limits import DISK_INSUFFICIENT_PREFIX
+
+        with self.connection() as conn:
+            row = conn.execute(
+                """SELECT COUNT(*) AS cnt FROM files
+                   WHERE status=? AND is_part=0
+                   AND last_error LIKE ?""",
+                (FileStatus.SKIPPED.value, f"{DISK_INSUFFICIENT_PREFIX}%"),
+            ).fetchone()
+            return int(row["cnt"]) if row else 0
+
+    def reset_disk_skipped_jobs(self) -> int:
+        """Re-queue skipped jobs that failed for transient insufficient disk only."""
+        from migradora.size_limits import DISK_INSUFFICIENT_PREFIX
+
+        with self.connection() as conn:
+            cur = conn.execute(
+                """UPDATE files SET status=?, last_error=NULL, updated_at=?
+                   WHERE status=? AND is_part=0
+                   AND last_error LIKE ?""",
+                (
+                    FileStatus.PENDING.value,
+                    utc_now(),
+                    FileStatus.SKIPPED.value,
+                    f"{DISK_INSUFFICIENT_PREFIX}%",
+                ),
+            )
+            return cur.rowcount
+
     def get_folder_mapping(self, gofile_path: str) -> str | None:
         record = self.get_folder_mapping_record(gofile_path)
         return record[0] if record else None

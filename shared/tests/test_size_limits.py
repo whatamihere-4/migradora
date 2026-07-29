@@ -5,7 +5,13 @@ from __future__ import annotations
 import unittest
 
 from migradora.config import Settings
-from migradora.size_limits import max_processable_source_bytes, oversize_skip_reason
+from migradora.size_limits import (
+    disk_insufficient_skip_reason,
+    is_disk_insufficient_skip_reason,
+    is_oversize_budget_skip_reason,
+    max_processable_source_bytes,
+    oversize_skip_reason,
+)
 
 
 class SizeLimitTests(unittest.TestCase):
@@ -37,6 +43,21 @@ class SizeLimitTests(unittest.TestCase):
         reason = oversize_skip_reason(limit + 1, settings)
         self.assertIsNotNone(reason)
         self.assertIn("too large", reason.lower())
+        self.assertTrue(is_oversize_budget_skip_reason(reason))
+
+    def test_disk_skip_reason_matching(self) -> None:
+        disk_reason = disk_insufficient_skip_reason("movie.mp4", 34.0, 21.9)
+        self.assertTrue(is_disk_insufficient_skip_reason(disk_reason))
+        self.assertFalse(is_oversize_budget_skip_reason(disk_reason))
+        budget_reason = oversize_skip_reason(50 * 1024**3, Settings(
+            disk_budget_gb=45,
+            min_free_disk_gb=5,
+            filester_max_file_bytes=10_200_547_328,
+            auto_skip_oversized=True,
+        ))
+        self.assertIsNotNone(budget_reason)
+        self.assertTrue(is_oversize_budget_skip_reason(budget_reason))
+        self.assertFalse(is_disk_insufficient_skip_reason(budget_reason))
 
 
 if __name__ == "__main__":
