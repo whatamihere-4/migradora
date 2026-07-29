@@ -5,6 +5,7 @@ from __future__ import annotations
 import unittest
 
 from migradora.ffmpeg_splitter import (
+    _effective_end_sec,
     _format_read_interval,
     _select_keyframe_at_or_after,
     plan_keyframe_part_starts,
@@ -47,6 +48,16 @@ class SparseKeyframeHelperTests(unittest.TestCase):
         self.assertEqual(_select_keyframe_at_or_after(kf, 15.0), 20.0)
         self.assertEqual(_select_keyframe_at_or_after(kf, 30.0), 30.0)
         self.assertIsNone(_select_keyframe_at_or_after(kf, 31.0))
+
+    def test_effective_end_exclusive(self) -> None:
+        self.assertEqual(
+            _effective_end_sec(0.0, 10.0, exclusive_end=True, frame_period=0.033),
+            10.0 - 0.033,
+        )
+        self.assertEqual(
+            _effective_end_sec(0.0, 10.0, exclusive_end=False, frame_period=0.033),
+            10.0,
+        )
 
 
 if __name__ == "__main__":

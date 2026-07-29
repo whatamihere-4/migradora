@@ -72,6 +72,57 @@ def probe_duration(path: str | Path, *, ffprobe_bin: str = "ffprobe") -> float:
     return dur
 
 
+def probe_frame_period(path: str | Path, *, ffprobe_bin: str = "ffprobe") -> float:
+    """Return average seconds between video frames (1 / fps)."""
+    proc = subprocess.run(
+        [
+            ffprobe_bin,
+            "-v",
+            "error",
+            "-select_streams",
+            "v:0",
+            "-show_entries",
+            "stream=avg_frame_rate",
+            "-of",
+            "default=noprint_wrappers=1:nokey=1",
+            str(path),
+        ],
+        capture_output=True,
+        text=True,
+        timeout=120,
+    )
+    raw = (proc.stdout or "").strip()
+    fps = 0.0
+    if "/" in raw:
+        num_s, den_s = raw.split("/", 1)
+        try:
+            den = float(den_s)
+            fps = float(num_s) / den if den else 0.0
+        except ValueError:
+            fps = 0.0
+    else:
+        try:
+            fps = float(raw)
+        except ValueError:
+            fps = 0.0
+    if fps <= _KEYFRAME_EPS:
+        return 1.0 / 30.0
+    return 1.0 / fps
+
+
+def _effective_end_sec(
+    start_sec: float,
+    end_sec: float,
+    *,
+    exclusive_end: bool,
+    frame_period: float,
+) -> float:
+    """Trim one frame before the next part's keyframe to avoid duplicate I-frames."""
+    if not exclusive_end or frame_period <= 0:
+        return end_sec
+    return max(start_sec + frame_period, end_sec - frame_period)
+
+
 def _format_read_interval(start_sec: float, end_sec: float, duration: float) -> str:
     """Build an ffprobe ``-read_intervals`` spec as a second-based window."""
     if duration <= 0:
@@ -531,28 +582,32 @@ def _extract_single_segment(
     ffmpeg_bin: str,
     timeout: int,
     skip_check: Callable[[], None] | None = None,
-    input_seek: bool = True,
+    exclusive_end: bool = False,
+    frame_period: float = 0.0,
 ) -> None:
     """Stream-copy ``[start_sec, end_sec)`` from ``path``.
 
-    When ``input_seek`` is true and ``start_sec`` is keyframe-aligned, ``-ss`` is
-    placed before ``-i`` so later parts do not re-read from the beginning of the
-    file. Part 1 still starts from timestamp zero.
+    ``-ss`` is placed after ``-i`` (output seek) so stream-copy lands on the
+    planned keyframe without snapping to an earlier one. Non-final parts use an
+    exclusive end (one frame before the next keyframe) so the boundary I-frame
+    is not duplicated in consecutive parts.
     """
-    duration_sec = end_sec - start_sec
+    effective_end = _effective_end_sec(
+        start_sec,
+        end_sec,
+        exclusive_end=exclusive_end,
+        frame_period=frame_period,
+    )
+    duration_sec = effective_end - start_sec
     if duration_sec <= _KEYFRAME_EPS:
         raise SplitError(
             f"Refusing zero-length segment for {Path(output_path).name} "
             f"({start_sec:.3f}s–{end_sec:.3f}s)"
         )
 
-    cmd = [ffmpeg_bin, "-hide_banner", "-y"]
-    if start_sec > _KEYFRAME_EPS and input_seek:
-        cmd += ["-ss", str(start_sec), "-i", str(path)]
-    else:
-        cmd += ["-i", str(path)]
-        if start_sec > _KEYFRAME_EPS:
-            cmd += ["-ss", str(start_sec)]
+    cmd = [ffmpeg_bin, "-hide_banner", "-y", "-i", str(path)]
+    if start_sec > _KEYFRAME_EPS:
+        cmd += ["-ss", str(start_sec)]
     cmd += [
         "-t",
         str(duration_sec),
@@ -565,14 +620,13 @@ def _extract_single_segment(
         "make_zero",
         str(output_path),
     ]
-    seek_mode = "input" if start_sec > _KEYFRAME_EPS and input_seek else "output"
     logger.info(
-        "ffmpeg slice %s @ %.3fs–%.3fs (%.3fs, %s seek)",
+        "ffmpeg slice %s @ %.3fs–%.3fs (%.3fs, output seek%s)",
         Path(output_path).name,
         start_sec,
-        end_sec,
+        effective_end,
         duration_sec,
-        seek_mode,
+        ", exclusive end" if exclusive_end else "",
     )
     _run_ffmpeg_logged(cmd, timeout=timeout, skip_check=skip_check)
 
@@ -613,6 +667,7 @@ def iter_upload_parts_sliced(
     stem = source.stem
     ext = source.suffix
     duration = probe_duration(source, ffprobe_bin=ffprobe_bin)
+    frame_period = probe_frame_period(source, ffprobe_bin=ffprobe_bin)
     bytes_per_sec = size / duration
 
     segment_time = None
@@ -648,7 +703,8 @@ def iter_upload_parts_sliced(
             ffmpeg_bin=ffmpeg_bin,
             timeout=ffmpeg_timeout,
             skip_check=skip_check,
-            input_seek=False,
+            exclusive_end=len(trial_starts) > 1,
+            frame_period=frame_period,
         )
         probe_size = probe_path.stat().st_size
         probe_path.unlink(missing_ok=True)
@@ -688,6 +744,7 @@ def iter_upload_parts_sliced(
 
         part_name = f"{stem}.PART{idx + 1}{ext}"
         part_path = output_dir / part_name
+        is_last = idx + 1 >= num_parts
         _extract_single_segment(
             source,
             part_path,
@@ -696,7 +753,8 @@ def iter_upload_parts_sliced(
             ffmpeg_bin=ffmpeg_bin,
             timeout=ffmpeg_timeout,
             skip_check=skip_check,
-            input_seek=start > _KEYFRAME_EPS,
+            exclusive_end=not is_last,
+            frame_period=frame_period,
         )
         part_size = part_path.stat().st_size
         if part_size > part_size_bytes:
