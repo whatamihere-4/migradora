@@ -5,8 +5,9 @@ from __future__ import annotations
 import unittest
 
 from migradora.ffmpeg_splitter import (
-    _effective_end_sec,
+    _format_mkvmerge_time,
     _format_read_interval,
+    _mkvmerge_split_spec,
     _select_keyframe_at_or_after,
     plan_keyframe_part_starts,
 )
@@ -49,14 +50,16 @@ class SparseKeyframeHelperTests(unittest.TestCase):
         self.assertEqual(_select_keyframe_at_or_after(kf, 30.0), 30.0)
         self.assertIsNone(_select_keyframe_at_or_after(kf, 31.0))
 
-    def test_effective_end_exclusive(self) -> None:
+    def test_mkvmerge_split_spec(self) -> None:
+        self.assertEqual(_format_mkvmerge_time(0.0), "00:00:00.000")
+        self.assertEqual(_format_mkvmerge_time(3661.5), "01:01:01.500")
         self.assertEqual(
-            _effective_end_sec(0.0, 10.0, exclusive_end=True, frame_period=0.033),
-            10.0 - 0.033,
+            _mkvmerge_split_spec(10.0, 20.0, duration=100.0),
+            "parts:00:00:10.000-00:00:20.000",
         )
         self.assertEqual(
-            _effective_end_sec(0.0, 10.0, exclusive_end=False, frame_period=0.033),
-            10.0,
+            _mkvmerge_split_spec(10.0, 100.0, duration=100.0),
+            "parts:00:00:10.000-",
         )
 
 

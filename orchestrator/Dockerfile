@@ -3,7 +3,7 @@ FROM python:3.12-slim
 WORKDIR /app
 
 RUN apt-get update \
-    && apt-get install -y --no-install-recommends curl coreutils ffmpeg \
+    && apt-get install -y --no-install-recommends curl coreutils ffmpeg mkvtoolnix \
     && rm -rf /var/lib/apt/lists/*
 
 COPY shared/requirements.txt /app/shared/requirements.txt

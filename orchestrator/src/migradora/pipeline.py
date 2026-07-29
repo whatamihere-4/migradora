@@ -342,6 +342,7 @@ class PipelineCoordinator:
                 split_mode=self.settings.filester_split_mode,
                 ffmpeg_bin=self.settings.ffmpeg_bin,
                 ffprobe_bin=self.settings.ffprobe_bin,
+                mkvmerge_bin=self.settings.mkvmerge_bin,
                 ffmpeg_timeout=self.settings.ffmpeg_timeout_sec,
             ):
                 self._check_skip(job.id)

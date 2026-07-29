@@ -71,6 +71,7 @@ class Settings:
     filester_split_mode: str = "bytes"
     ffmpeg_bin: str = "ffmpeg"
     ffprobe_bin: str = "ffprobe"
+    mkvmerge_bin: str = "mkvmerge"
     ffmpeg_timeout_sec: int = 7200
 
     # Paths
@@ -151,6 +152,7 @@ class Settings:
             filester_split_mode=parse_split_mode(_env("FILESTER_SPLIT_MODE", "bytes")),
             ffmpeg_bin=_env("FFMPEG_BIN", "ffmpeg"),
             ffprobe_bin=_env("FFPROBE_BIN", "ffprobe"),
+            mkvmerge_bin=_env("MKVMERGE_BIN", "mkvmerge"),
             ffmpeg_timeout_sec=_env_int("SPLITTER_FFMPEG_TIMEOUT_SEC", 7200),
             download_dir=_env("DOWNLOAD_DIR", "/data/downloads"),
             state_dir=state_dir,

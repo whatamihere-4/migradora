@@ -1,10 +1,8 @@
-"""Split oversized media into watchable parts via ffmpeg stream-copy (one part at a time).
+"""Split oversized media into watchable parts via mkvmerge + ffmpeg remux (one part at a time).
 
-Parts are named ``<name>.PART1.<ext>``, ``<name>.PART2.<ext>`` … and each is
-independently playable. Splits are aligned to video keyframes so parts rejoin
-losslessly with the concat demuxer::
-
-    ffmpeg -f concat -safe 0 -i list.txt -c copy movie.mkv
+Each part is extracted with ``mkvmerge --split parts:…`` (clean time boundaries on MP4
+input), remuxed to MP4 with ``ffmpeg -c copy``, and named ``<name>.PART1.<ext>`` …
+Parts rejoin losslessly with the concat demuxer.
 """
 
 from __future__ import annotations
@@ -72,55 +70,18 @@ def probe_duration(path: str | Path, *, ffprobe_bin: str = "ffprobe") -> float:
     return dur
 
 
-def probe_frame_period(path: str | Path, *, ffprobe_bin: str = "ffprobe") -> float:
-    """Return average seconds between video frames (1 / fps)."""
-    proc = subprocess.run(
-        [
-            ffprobe_bin,
-            "-v",
-            "error",
-            "-select_streams",
-            "v:0",
-            "-show_entries",
-            "stream=avg_frame_rate",
-            "-of",
-            "default=noprint_wrappers=1:nokey=1",
-            str(path),
-        ],
-        capture_output=True,
-        text=True,
-        timeout=120,
-    )
-    raw = (proc.stdout or "").strip()
-    fps = 0.0
-    if "/" in raw:
-        num_s, den_s = raw.split("/", 1)
-        try:
-            den = float(den_s)
-            fps = float(num_s) / den if den else 0.0
-        except ValueError:
-            fps = 0.0
-    else:
-        try:
-            fps = float(raw)
-        except ValueError:
-            fps = 0.0
-    if fps <= _KEYFRAME_EPS:
-        return 1.0 / 30.0
-    return 1.0 / fps
+def _format_mkvmerge_time(sec: float) -> str:
+    sec = max(0.0, sec)
+    hours = int(sec // 3600)
+    minutes = int((sec % 3600) // 60)
+    seconds = sec % 60
+    return f"{hours:02d}:{minutes:02d}:{seconds:06.3f}"
 
 
-def _effective_end_sec(
-    start_sec: float,
-    end_sec: float,
-    *,
-    exclusive_end: bool,
-    frame_period: float,
-) -> float:
-    """Trim one frame before the next part's keyframe to avoid duplicate I-frames."""
-    if not exclusive_end or frame_period <= 0:
-        return end_sec
-    return max(start_sec + frame_period, end_sec - frame_period)
+def _mkvmerge_split_spec(start_sec: float, end_sec: float, duration: float) -> str:
+    if end_sec >= duration - _KEYFRAME_EPS:
+        return f"parts:{_format_mkvmerge_time(start_sec)}-"
+    return f"parts:{_format_mkvmerge_time(start_sec)}-{_format_mkvmerge_time(end_sec)}"
 
 
 def _format_read_interval(start_sec: float, end_sec: float, duration: float) -> str:
@@ -478,9 +439,26 @@ def plan_sparse_keyframe_part_starts(
     return starts
 
 
-def _copy_stream_maps() -> list[str]:
-    """Video + audio only (skip timecode/data tracks that break MP4 segment muxing)."""
-    return ["-map", "0:v", "-map", "0:a?"]
+def _run_mkvmerge(
+    cmd: list[str],
+    *,
+    timeout: int,
+    skip_check: Callable[[], None] | None = None,
+) -> None:
+    if skip_check:
+        skip_check()
+    try:
+        proc = subprocess.run(cmd, capture_output=True, text=True, timeout=timeout)
+    except subprocess.TimeoutExpired as exc:
+        raise SplitError(f"mkvmerge timed out after {timeout}s") from exc
+
+    if proc.returncode >= 2:
+        tail = (proc.stderr or proc.stdout or "")[-600:]
+        raise SplitError(f"mkvmerge failed (exit {proc.returncode}): {tail}")
+    if proc.returncode == 1:
+        tail = (proc.stderr or proc.stdout or "").strip()
+        if tail:
+            logger.warning("mkvmerge warnings: %s", tail[-400:])
 
 
 def _ffmpeg_line_for_log(line: str) -> str | None:
@@ -579,56 +557,49 @@ def _extract_single_segment(
     start_sec: float,
     end_sec: float,
     *,
+    duration: float,
     ffmpeg_bin: str,
+    mkvmerge_bin: str,
     timeout: int,
     skip_check: Callable[[], None] | None = None,
-    exclusive_end: bool = False,
-    frame_period: float = 0.0,
 ) -> None:
-    """Stream-copy ``[start_sec, end_sec)`` from ``path``.
-
-    ``-ss`` is placed after ``-i`` (output seek) so stream-copy lands on the
-    planned keyframe without snapping to an earlier one. Non-final parts use an
-    exclusive end (one frame before the next keyframe) so the boundary I-frame
-    is not duplicated in consecutive parts.
-    """
-    effective_end = _effective_end_sec(
-        start_sec,
-        end_sec,
-        exclusive_end=exclusive_end,
-        frame_period=frame_period,
-    )
-    duration_sec = effective_end - start_sec
-    if duration_sec <= _KEYFRAME_EPS:
+    """Extract ``[start_sec, end_sec)`` via mkvmerge, remux to MP4 with ffmpeg."""
+    if end_sec - start_sec <= _KEYFRAME_EPS:
         raise SplitError(
             f"Refusing zero-length segment for {Path(output_path).name} "
             f"({start_sec:.3f}s–{end_sec:.3f}s)"
         )
 
-    cmd = [ffmpeg_bin, "-hide_banner", "-y", "-i", str(path)]
-    if start_sec > _KEYFRAME_EPS:
-        cmd += ["-ss", str(start_sec)]
-    cmd += [
-        "-t",
-        str(duration_sec),
-        *_copy_stream_maps(),
-        "-c",
-        "copy",
-        "-reset_timestamps",
-        "1",
-        "-avoid_negative_ts",
-        "make_zero",
-        str(output_path),
+    spec = _mkvmerge_split_spec(start_sec, end_sec, duration)
+    temp_mkv = Path(output_path).with_suffix(".mkv.tmp")
+    temp_mkv.unlink(missing_ok=True)
+
+    mkv_cmd = [
+        mkvmerge_bin,
+        "-o",
+        str(temp_mkv),
+        "--split",
+        spec,
+        str(path),
     ]
-    logger.info(
-        "ffmpeg slice %s @ %.3fs–%.3fs (%.3fs, output seek%s)",
-        Path(output_path).name,
-        start_sec,
-        effective_end,
-        duration_sec,
-        ", exclusive end" if exclusive_end else "",
-    )
-    _run_ffmpeg_logged(cmd, timeout=timeout, skip_check=skip_check)
+    logger.info("mkvmerge split %s %s", Path(output_path).name, spec)
+    try:
+        _run_mkvmerge(mkv_cmd, timeout=timeout, skip_check=skip_check)
+        ffmpeg_cmd = [
+            ffmpeg_bin,
+            "-hide_banner",
+            "-y",
+            "-i",
+            str(temp_mkv),
+            "-c",
+            "copy",
+            "-movflags",
+            "+faststart",
+            str(output_path),
+        ]
+        _run_ffmpeg_logged(ffmpeg_cmd, timeout=timeout, skip_check=skip_check)
+    finally:
+        temp_mkv.unlink(missing_ok=True)
 
 
 def iter_upload_parts_sliced(
@@ -638,11 +609,12 @@ def iter_upload_parts_sliced(
     *,
     ffmpeg_bin: str = "ffmpeg",
     ffprobe_bin: str = "ffprobe",
+    mkvmerge_bin: str = "mkvmerge",
     ffmpeg_timeout: int = 7200,
     skip_check: Callable[[], None] | None = None,
     delete_source: bool = True,
 ) -> Iterator[dict]:
-    """Yield one ffmpeg stream-copy part at a time (~source + one part on disk)."""
+    """Yield one mkvmerge/ffmpeg part at a time (~source + one part on disk)."""
     source = Path(source)
     output_dir = Path(output_dir)
     output_dir.mkdir(parents=True, exist_ok=True)
@@ -667,7 +639,6 @@ def iter_upload_parts_sliced(
     stem = source.stem
     ext = source.suffix
     duration = probe_duration(source, ffprobe_bin=ffprobe_bin)
-    frame_period = probe_frame_period(source, ffprobe_bin=ffprobe_bin)
     bytes_per_sec = size / duration
 
     segment_time = None
@@ -700,11 +671,11 @@ def iter_upload_parts_sliced(
             probe_path,
             0,
             first_end,
+            duration=duration,
             ffmpeg_bin=ffmpeg_bin,
+            mkvmerge_bin=mkvmerge_bin,
             timeout=ffmpeg_timeout,
             skip_check=skip_check,
-            exclusive_end=len(trial_starts) > 1,
-            frame_period=frame_period,
         )
         probe_size = probe_path.stat().st_size
         probe_path.unlink(missing_ok=True)
@@ -744,17 +715,16 @@ def iter_upload_parts_sliced(
 
         part_name = f"{stem}.PART{idx + 1}{ext}"
         part_path = output_dir / part_name
-        is_last = idx + 1 >= num_parts
         _extract_single_segment(
             source,
             part_path,
             start,
             end,
+            duration=duration,
             ffmpeg_bin=ffmpeg_bin,
+            mkvmerge_bin=mkvmerge_bin,
             timeout=ffmpeg_timeout,
             skip_check=skip_check,
-            exclusive_end=not is_last,
-            frame_period=frame_period,
         )
         part_size = part_path.stat().st_size
         if part_size > part_size_bytes:

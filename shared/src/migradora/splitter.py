@@ -148,6 +148,7 @@ def iter_upload_parts(
     split_mode: str = "bytes",
     ffmpeg_bin: str = "ffmpeg",
     ffprobe_bin: str = "ffprobe",
+    mkvmerge_bin: str = "mkvmerge",
     ffmpeg_timeout: int = 7200,
     delete_source: bool = True,
 ) -> Iterator[dict]:
@@ -157,8 +158,8 @@ def iter_upload_parts(
     ``bytes`` (default): byte-range parts rejoined with ``cat``. Only one part
     exists on disk alongside the source at any moment.
 
-    ``ffmpeg_slice``: stream-copy parts via ffmpeg one at a time (playable,
-    same peak disk as bytes mode; more CPU).
+    ``ffmpeg_slice``: playable parts via mkvmerge time split + ffmpeg remux
+    (one part at a time; brief temp .mkv per part; more CPU than bytes mode).
     """
     source = Path(source)
     output_dir = Path(output_dir)
@@ -175,6 +176,7 @@ def iter_upload_parts(
             part_size_bytes,
             ffmpeg_bin=ffmpeg_bin,
             ffprobe_bin=ffprobe_bin,
+            mkvmerge_bin=mkvmerge_bin,
             ffmpeg_timeout=ffmpeg_timeout,
             skip_check=skip_check,
             delete_source=delete_source,
