@@ -148,73 +148,7 @@ print(f"split_total_sec={elapsed:.2f}")
 PY
 
 echo
-echo "==> 3) Boundary sanity (last frame of PART1 vs first of PART2)"
-docker exec -i "$CONTAINER" python3 - "$OUT_DIR" <<'PY'
-import subprocess
-import sys
-from pathlib import Path
-
-out_dir = Path(sys.argv[1])
-parts = sorted(out_dir.glob("*.PART*.mp4"))
-if len(parts) < 2:
-    print("only one part; boundary check skipped")
-    raise SystemExit(0)
-
-p1, p2 = parts[0], parts[1]
-
-def frame_count(path: Path) -> int:
-    proc = subprocess.run(
-        [
-            "ffprobe", "-v", "error", "-select_streams", "v:0",
-            "-count_packets", "-show_entries", "stream=nb_read_packets",
-            "-of", "csv=p=0", str(path),
-        ],
-        capture_output=True,
-        text=True,
-        check=True,
-    )
-    return int(proc.stdout.strip())
-
-def last_pts(path: Path) -> float:
-    proc = subprocess.run(
-        [
-            "ffprobe", "-v", "error", "-select_streams", "v:0",
-            "-show_frames", "-show_entries", "frame=pts_time",
-            "-of", "csv=p=0", str(path),
-        ],
-        capture_output=True,
-        text=True,
-        check=True,
-    )
-    lines = [ln.strip() for ln in proc.stdout.splitlines() if ln.strip()]
-    return float(lines[-1])
-
-def first_pts(path: Path) -> float:
-    proc = subprocess.run(
-        [
-            "ffprobe", "-v", "error", "-select_streams", "v:0",
-            "-show_frames", "-show_entries", "frame=pts_time",
-            "-read_intervals", "%+0.5",
-            "-of", "csv=p=0", str(path),
-        ],
-        capture_output=True,
-        text=True,
-        check=True,
-    )
-    lines = [ln.strip() for ln in proc.stdout.splitlines() if ln.strip()]
-    return float(lines[0])
-
-n1 = frame_count(p1)
-n2 = frame_count(p2)
-l1 = last_pts(p1)
-f2 = first_pts(p2)
-print(f"PART1 frames={n1} last_pts={l1:.6f}")
-print(f"PART2 frames={n2} first_pts={f2:.6f}")
-print(f"pts_gap={f2 - l1:.6f} (expect small positive step, not duplicate overlap)")
-PY
-
-echo
-echo "==> 4) Merge parts with ffmpeg concat (stream copy)"
+echo "==> 3) Merge parts with ffmpeg concat (stream copy)"
 docker exec -i "$CONTAINER" python3 - "$CONTAINER_INPUT" "$OUT_DIR" <<'PY'
 import subprocess
 import sys
@@ -251,7 +185,7 @@ print(f"  merged size: {merged.stat().st_size:,} bytes")
 PY
 
 echo
-echo "==> 5) Merge integrity (duration + frame counts)"
+echo "==> 4) Merge integrity (duration + frame counts; overlap => parts_sum > source)"
 docker exec -i "$CONTAINER" python3 - "$CONTAINER_INPUT" "$OUT_DIR" <<'PY'
 import subprocess
 import sys
