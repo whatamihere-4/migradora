@@ -4,7 +4,11 @@ from __future__ import annotations
 
 import unittest
 
-from migradora.ffmpeg_splitter import plan_keyframe_part_starts
+from migradora.ffmpeg_splitter import (
+    _format_read_interval,
+    _select_keyframe_at_or_after,
+    plan_keyframe_part_starts,
+)
 
 
 class KeyframeSplitPlanTests(unittest.TestCase):
@@ -32,6 +36,17 @@ class KeyframeSplitPlanTests(unittest.TestCase):
             plan_keyframe_part_starts(kf, duration=30.0, target_segment_time=10),
             [0.0, 12.0, 24.0],
         )
+
+
+class SparseKeyframeHelperTests(unittest.TestCase):
+    def test_format_read_interval_window(self) -> None:
+        self.assertEqual(_format_read_interval(100.0, 200.0, 1000.0), "100.000%200.000")
+
+    def test_select_keyframe_at_or_after(self) -> None:
+        kf = [0.0, 10.0, 20.0, 30.0]
+        self.assertEqual(_select_keyframe_at_or_after(kf, 15.0), 20.0)
+        self.assertEqual(_select_keyframe_at_or_after(kf, 30.0), 30.0)
+        self.assertIsNone(_select_keyframe_at_or_after(kf, 31.0))
 
 
 if __name__ == "__main__":

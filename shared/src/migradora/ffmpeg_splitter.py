@@ -10,7 +10,6 @@ losslessly with the concat demuxer::
 from __future__ import annotations
 
 import logging
-import math
 import subprocess
 import threading
 import time
@@ -21,6 +20,8 @@ logger = logging.getLogger("migradora.ffmpeg_splitter")
 
 _TARGET_FACTORS = (0.90, 0.75, 0.60)
 _KEYFRAME_EPS = 0.001
+_SPARSE_WINDOW_BEFORE_SEC = 60.0
+_SPARSE_WINDOW_AFTER_SEC = 120.0
 
 
 class SplitError(RuntimeError):
@@ -54,6 +55,186 @@ def probe_duration(path: str | Path, *, ffprobe_bin: str = "ffprobe") -> float:
             f"cannot split {Path(path).name}"
         )
     return dur
+
+
+def _format_read_interval(start_sec: float, end_sec: float, duration: float) -> str:
+    """Build an ffprobe ``-read_intervals`` spec as a second-based window."""
+    if duration <= 0:
+        raise SplitError("Cannot build read interval for zero-duration media")
+    start_sec = max(0.0, min(start_sec, duration))
+    end_sec = max(start_sec, min(end_sec, duration))
+    if end_sec <= start_sec + _KEYFRAME_EPS:
+        end_sec = min(duration, start_sec + 1.0)
+    return f"{start_sec:.3f}%{end_sec:.3f}"
+
+
+def _parse_keyframe_times(stdout: str) -> list[float]:
+    times: list[float] = []
+    for line in (stdout or "").splitlines():
+        line = line.strip()
+        if not line:
+            continue
+        try:
+            t = float(line)
+        except ValueError:
+            continue
+        if t >= -_KEYFRAME_EPS:
+            times.append(t)
+    return times
+
+
+def _keyframes_from_packets_in_interval(
+    path: str | Path,
+    *,
+    start_sec: float,
+    end_sec: float,
+    ffprobe_bin: str,
+) -> list[float]:
+    proc = subprocess.run(
+        [
+            ffprobe_bin,
+            "-v",
+            "error",
+            "-read_intervals",
+            f"{start_sec:.6f}%{end_sec:.6f}",
+            "-select_streams",
+            "v:0",
+            "-show_entries",
+            "packet=pts_time,flags",
+            "-of",
+            "csv=p=0",
+            str(path),
+        ],
+        capture_output=True,
+        text=True,
+        timeout=600,
+    )
+    if proc.returncode != 0:
+        return []
+
+    times: list[float] = []
+    for line in (proc.stdout or "").splitlines():
+        line = line.strip()
+        if not line:
+            continue
+        parts = line.split(",", 1)
+        if len(parts) != 2 or "K" not in parts[1]:
+            continue
+        try:
+            t = float(parts[0])
+        except ValueError:
+            continue
+        if start_sec - _KEYFRAME_EPS <= t <= end_sec + _KEYFRAME_EPS:
+            times.append(t)
+    return times
+
+
+def _probe_keyframes_in_interval(
+    path: str | Path,
+    *,
+    start_sec: float,
+    end_sec: float,
+    duration: float,
+    ffprobe_bin: str = "ffprobe",
+) -> list[float]:
+    """Return keyframe PTS values found in ``[start_sec, end_sec]`` without scanning the whole file."""
+    if duration <= 0:
+        return []
+    start_sec = max(0.0, start_sec)
+    end_sec = min(duration, end_sec)
+    if end_sec <= start_sec + _KEYFRAME_EPS:
+        return []
+
+    interval = _format_read_interval(start_sec, end_sec, duration)
+    proc = subprocess.run(
+        [
+            ffprobe_bin,
+            "-v",
+            "error",
+            "-read_intervals",
+            interval,
+            "-skip_frame",
+            "nokey",
+            "-select_streams",
+            "v:0",
+            "-show_entries",
+            "frame=pts_time",
+            "-of",
+            "csv=p=0",
+            str(path),
+        ],
+        capture_output=True,
+        text=True,
+        timeout=600,
+    )
+    if proc.returncode != 0:
+        tail = (proc.stderr or "")[-400:]
+        raise SplitError(
+            f"ffprobe keyframe window failed for {Path(path).name} ({interval}): {tail}"
+        )
+
+    times = _parse_keyframe_times(proc.stdout or "")
+    if not times:
+        times = _keyframes_from_packets_in_interval(
+            path,
+            start_sec=start_sec,
+            end_sec=end_sec,
+            ffprobe_bin=ffprobe_bin,
+        )
+    return sorted(set(times))
+
+
+def _select_keyframe_at_or_after(times: list[float], target_sec: float) -> float | None:
+    candidates = [t for t in sorted(times) if t >= target_sec - _KEYFRAME_EPS]
+    return candidates[0] if candidates else None
+
+
+def find_keyframe_at_or_after(
+    path: str | Path,
+    target_sec: float,
+    duration: float,
+    target_segment_time: float,
+    *,
+    ffprobe_bin: str = "ffprobe",
+) -> float | None:
+    """Find the first keyframe at or after ``target_sec`` using sparse ffprobe windows."""
+    if duration <= 0:
+        return None
+
+    target_sec = max(0.0, min(target_sec, duration))
+    margin_before = max(_SPARSE_WINDOW_BEFORE_SEC, target_segment_time * 0.25)
+    margin_after = max(_SPARSE_WINDOW_AFTER_SEC, target_segment_time * 1.5)
+
+    windows: list[tuple[float, float]] = [
+        (max(0.0, target_sec - margin_before), min(duration, target_sec + margin_after)),
+        (max(0.0, target_sec - margin_before * 2), min(duration, target_sec + margin_after * 2)),
+        (target_sec, duration),
+    ]
+
+    seen: set[tuple[float, float]] = set()
+    for start_sec, end_sec in windows:
+        key = (round(start_sec, 3), round(end_sec, 3))
+        if key in seen:
+            continue
+        seen.add(key)
+
+        times = _probe_keyframes_in_interval(
+            path,
+            start_sec=start_sec,
+            end_sec=end_sec,
+            duration=duration,
+            ffprobe_bin=ffprobe_bin,
+        )
+        picked = _select_keyframe_at_or_after(times, target_sec)
+        if picked is not None:
+            return picked
+
+    logger.warning(
+        "Sparse keyframe lookup missed target %.3fs in %s; falling back to full scan",
+        target_sec,
+        Path(path).name,
+    )
+    return _select_keyframe_at_or_after(probe_keyframe_times(path, ffprobe_bin=ffprobe_bin), target_sec)
 
 
 def _keyframes_from_packets(path: str | Path, *, ffprobe_bin: str) -> list[float]:
@@ -95,7 +276,7 @@ def _keyframes_from_packets(path: str | Path, *, ffprobe_bin: str) -> list[float
 
 
 def probe_keyframe_times(path: str | Path, *, ffprobe_bin: str = "ffprobe") -> list[float]:
-    """Return sorted presentation timestamps of video keyframes."""
+    """Return sorted presentation timestamps of all video keyframes (full-file scan)."""
     proc = subprocess.run(
         [
             ffprobe_bin,
@@ -119,18 +300,7 @@ def probe_keyframe_times(path: str | Path, *, ffprobe_bin: str = "ffprobe") -> l
         tail = (proc.stderr or "")[-400:]
         raise SplitError(f"ffprobe keyframe scan failed for {Path(path).name}: {tail}")
 
-    times: list[float] = []
-    for line in (proc.stdout or "").splitlines():
-        line = line.strip()
-        if not line:
-            continue
-        try:
-            t = float(line)
-        except ValueError:
-            continue
-        if t >= -_KEYFRAME_EPS:
-            times.append(t)
-
+    times = _parse_keyframe_times(proc.stdout or "")
     if not times:
         times = _keyframes_from_packets(path, ffprobe_bin=ffprobe_bin)
 
@@ -150,9 +320,9 @@ def plan_keyframe_part_starts(
 ) -> list[float]:
     """Return part start times ``[0, kf1, kf2, ...]`` on keyframe boundaries.
 
-  Each part runs from one start time to the next (or ``duration`` for the last
-  part). Every non-zero start is a keyframe so parts are playable on their own
-  and concat with ``-c copy`` without overlap.
+    Each part runs from one start time to the next (or ``duration`` for the last
+    part). Every non-zero start is a keyframe so parts are playable on their own
+    and concat with ``-c copy`` without overlap.
     """
     if duration <= 0:
         return [0.0]
@@ -177,6 +347,51 @@ def plan_keyframe_part_starts(
             if not later:
                 break
             next_start = later[0]
+
+        if next_start >= duration - _KEYFRAME_EPS:
+            break
+
+        starts.append(next_start)
+
+    return starts
+
+
+def plan_sparse_keyframe_part_starts(
+    path: str | Path,
+    duration: float,
+    target_segment_time: float,
+    *,
+    ffprobe_bin: str = "ffprobe",
+) -> list[float]:
+    """Plan part starts by probing only near each split boundary."""
+    if duration <= 0:
+        return [0.0]
+
+    starts = [0.0]
+    while starts[-1] < duration - _KEYFRAME_EPS:
+        target = starts[-1] + max(1.0, target_segment_time)
+        if target >= duration - _KEYFRAME_EPS:
+            break
+
+        next_start = find_keyframe_at_or_after(
+            path,
+            target,
+            duration,
+            target_segment_time,
+            ffprobe_bin=ffprobe_bin,
+        )
+        if next_start is None:
+            break
+        if next_start <= starts[-1] + _KEYFRAME_EPS:
+            next_start = find_keyframe_at_or_after(
+                path,
+                starts[-1] + _KEYFRAME_EPS,
+                duration,
+                target_segment_time,
+                ffprobe_bin=ffprobe_bin,
+            )
+            if next_start is None or next_start <= starts[-1] + _KEYFRAME_EPS:
+                break
 
         if next_start >= duration - _KEYFRAME_EPS:
             break
@@ -290,11 +505,13 @@ def _extract_single_segment(
     ffmpeg_bin: str,
     timeout: int,
     skip_check: Callable[[], None] | None = None,
+    input_seek: bool = True,
 ) -> None:
     """Stream-copy ``[start_sec, end_sec)`` from ``path``.
 
-    ``-ss`` is placed after ``-i`` so stream-copy seeks to the exact keyframe
-    start time instead of snapping to an earlier keyframe (which overlaps parts).
+    When ``input_seek`` is true and ``start_sec`` is keyframe-aligned, ``-ss`` is
+    placed before ``-i`` so later parts do not re-read from the beginning of the
+    file. Part 1 still starts from timestamp zero.
     """
     duration_sec = end_sec - start_sec
     if duration_sec <= _KEYFRAME_EPS:
@@ -303,15 +520,13 @@ def _extract_single_segment(
             f"({start_sec:.3f}s–{end_sec:.3f}s)"
         )
 
-    cmd = [
-        ffmpeg_bin,
-        "-hide_banner",
-        "-y",
-        "-i",
-        str(path),
-    ]
-    if start_sec > _KEYFRAME_EPS:
-        cmd += ["-ss", str(start_sec)]
+    cmd = [ffmpeg_bin, "-hide_banner", "-y"]
+    if start_sec > _KEYFRAME_EPS and input_seek:
+        cmd += ["-ss", str(start_sec), "-i", str(path)]
+    else:
+        cmd += ["-i", str(path)]
+        if start_sec > _KEYFRAME_EPS:
+            cmd += ["-ss", str(start_sec)]
     cmd += [
         "-t",
         str(duration_sec),
@@ -324,12 +539,14 @@ def _extract_single_segment(
         "make_zero",
         str(output_path),
     ]
+    seek_mode = "input" if start_sec > _KEYFRAME_EPS and input_seek else "output"
     logger.info(
-        "ffmpeg slice %s @ %.3fs–%.3fs (%.3fs)",
+        "ffmpeg slice %s @ %.3fs–%.3fs (%.3fs, %s seek)",
         Path(output_path).name,
         start_sec,
         end_sec,
         duration_sec,
+        seek_mode,
     )
     _run_ffmpeg_logged(cmd, timeout=timeout, skip_check=skip_check)
 
@@ -370,7 +587,6 @@ def iter_upload_parts_sliced(
     stem = source.stem
     ext = source.suffix
     duration = probe_duration(source, ffprobe_bin=ffprobe_bin)
-    keyframes = probe_keyframe_times(source, ffprobe_bin=ffprobe_bin)
     bytes_per_sec = size / duration
 
     segment_time = None
@@ -382,15 +598,22 @@ def iter_upload_parts_sliced(
 
         target_bytes = int(part_size_bytes * factor)
         trial_segment_time = max(1, int(target_bytes / bytes_per_sec))
-        trial_starts = plan_keyframe_part_starts(
-            keyframes, duration, trial_segment_time
+        logger.info(
+            "Planning sparse keyframe split for %s (~%ds target, factor %s)",
+            source.name,
+            trial_segment_time,
+            factor,
+        )
+        trial_starts = plan_sparse_keyframe_part_starts(
+            source,
+            duration,
+            trial_segment_time,
+            ffprobe_bin=ffprobe_bin,
         )
         probe_path = output_dir / f"{stem}.PART1{ext}"
         probe_path.unlink(missing_ok=True)
 
-        first_end = (
-            trial_starts[1] if len(trial_starts) > 1 else duration
-        )
+        first_end = trial_starts[1] if len(trial_starts) > 1 else duration
         _extract_single_segment(
             source,
             probe_path,
@@ -399,6 +622,7 @@ def iter_upload_parts_sliced(
             ffmpeg_bin=ffmpeg_bin,
             timeout=ffmpeg_timeout,
             skip_check=skip_check,
+            input_seek=False,
         )
         probe_size = probe_path.stat().st_size
         probe_path.unlink(missing_ok=True)
@@ -446,6 +670,7 @@ def iter_upload_parts_sliced(
             ffmpeg_bin=ffmpeg_bin,
             timeout=ffmpeg_timeout,
             skip_check=skip_check,
+            input_seek=start > _KEYFRAME_EPS,
         )
         part_size = part_path.stat().st_size
         if part_size > part_size_bytes:
