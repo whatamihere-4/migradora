@@ -1,15 +1,15 @@
 """Split oversized media into watchable parts via mkvmerge + ffmpeg remux (one part at a time).
 
 Each part is extracted with ``mkvmerge --split parts:…`` (clean time boundaries on MP4
-input), remuxed to MP4 with ``ffmpeg -c copy``, and named ``<name>.PART1.<ext>`` …
-Parts rejoin losslessly with the concat demuxer.
+input), streamed through a named pipe into ``ffmpeg -c copy`` (no temp file on disk).
+Parts are named ``<name>.PART1.<ext>`` … and rejoin losslessly with the concat demuxer.
 """
 
 from __future__ import annotations
 
 import logging
+import os
 import subprocess
-import threading
 import time
 from collections.abc import Callable, Iterator
 from pathlib import Path
@@ -439,118 +439,6 @@ def plan_sparse_keyframe_part_starts(
     return starts
 
 
-def _run_mkvmerge(
-    cmd: list[str],
-    *,
-    timeout: int,
-    skip_check: Callable[[], None] | None = None,
-) -> None:
-    if skip_check:
-        skip_check()
-    try:
-        proc = subprocess.run(cmd, capture_output=True, text=True, timeout=timeout)
-    except subprocess.TimeoutExpired as exc:
-        raise SplitError(f"mkvmerge timed out after {timeout}s") from exc
-
-    if proc.returncode >= 2:
-        tail = (proc.stderr or proc.stdout or "")[-600:]
-        raise SplitError(f"mkvmerge failed (exit {proc.returncode}): {tail}")
-    if proc.returncode == 1:
-        tail = (proc.stderr or proc.stdout or "").strip()
-        if tail:
-            logger.warning("mkvmerge warnings: %s", tail[-400:])
-
-
-def _ffmpeg_line_for_log(line: str) -> str | None:
-    s = line.strip()
-    if not s:
-        return None
-    lower = s.lower()
-    if lower.startswith("ffmpeg version") or lower.startswith("configuration:"):
-        return None
-    if "libav" in lower and ("copyright" in lower or "built with" in lower):
-        return None
-    if "input #" in lower and "from '" in lower:
-        return None
-    if "output #" in lower and "to '" in lower:
-        return s
-    if "opening '" in lower or "stream mapping" in lower:
-        return s
-    if "error" in lower or "failed" in lower or "warning" in lower:
-        return s
-    if "time=" in s and ("frame=" in s or "size=" in s or "bitrate=" in s):
-        return s
-    if s.startswith("frame="):
-        return s
-    return None
-
-
-def _run_ffmpeg_logged(
-    cmd: list[str],
-    *,
-    timeout: int,
-    skip_check: Callable[[], None] | None = None,
-) -> None:
-    if "-stats_period" not in cmd:
-        insert_at = 1 if len(cmd) > 1 and cmd[1] == "-hide_banner" else 1
-        cmd = cmd[:insert_at] + ["-stats_period", "1"] + cmd[insert_at:]
-
-    proc = subprocess.Popen(
-        cmd,
-        stdout=subprocess.DEVNULL,
-        stderr=subprocess.PIPE,
-        text=True,
-        bufsize=1,
-    )
-    stderr_buf: list[str] = []
-    last_progress = [0.0]
-
-    def _reader() -> None:
-        assert proc.stderr is not None
-        for line in proc.stderr:
-            stderr_buf.append(line)
-            picked = _ffmpeg_line_for_log(line)
-            if not picked:
-                continue
-            now = time.time()
-            if "time=" in picked and (now - last_progress[0]) < 1.0:
-                continue
-            if "time=" in picked:
-                last_progress[0] = now
-            logger.info("[ffmpeg] %s", picked)
-
-    reader = threading.Thread(target=_reader, daemon=True)
-    reader.start()
-
-    deadline = time.time() + timeout
-    rc = None
-    try:
-        while True:
-            if skip_check:
-                skip_check()
-            rc = proc.poll()
-            if rc is not None:
-                break
-            if time.time() > deadline:
-                proc.kill()
-                proc.wait()
-                raise SplitError(f"ffmpeg timed out after {timeout}s")
-            time.sleep(0.25)
-    finally:
-        if rc is None and proc.poll() is None:
-            proc.terminate()
-            try:
-                proc.wait(timeout=5)
-            except subprocess.TimeoutExpired:
-                proc.kill()
-                proc.wait()
-        reader.join(timeout=3)
-
-    if rc != 0:
-        tail = "".join(stderr_buf)[-600:]
-        raise SplitError(f"ffmpeg failed (exit {rc}): {tail}")
-
-
 def _extract_single_segment(
     path: str | Path,
     output_path: str | Path,
@@ -563,7 +451,7 @@ def _extract_single_segment(
     timeout: int,
     skip_check: Callable[[], None] | None = None,
 ) -> None:
-    """Extract ``[start_sec, end_sec)`` via mkvmerge, remux to MP4 with ffmpeg."""
+    """Extract ``[start_sec, end_sec)`` via mkvmerge → fifo → ffmpeg (no temp file)."""
     if end_sec - start_sec <= _KEYFRAME_EPS:
         raise SplitError(
             f"Refusing zero-length segment for {Path(output_path).name} "
@@ -571,35 +459,91 @@ def _extract_single_segment(
         )
 
     spec = _mkvmerge_split_spec(start_sec, end_sec, duration)
-    temp_mkv = Path(output_path).with_suffix(".mkv.tmp")
-    temp_mkv.unlink(missing_ok=True)
+    output_path = Path(output_path)
+    fifo = output_path.with_suffix(output_path.suffix + ".fifo")
+    fifo.unlink(missing_ok=True)
+    os.mkfifo(fifo)
 
-    mkv_cmd = [
-        mkvmerge_bin,
-        "-o",
-        str(temp_mkv),
-        "--split",
-        spec,
-        str(path),
+    ffmpeg_cmd = [
+        ffmpeg_bin,
+        "-hide_banner",
+        "-y",
+        "-i",
+        str(fifo),
+        "-c",
+        "copy",
+        "-movflags",
+        "+faststart",
+        str(output_path),
     ]
-    logger.info("mkvmerge split %s %s", Path(output_path).name, spec)
+    logger.info("mkvmerge→fifo→ffmpeg %s %s", output_path.name, spec)
+
+    ff_proc: subprocess.Popen[str] | None = None
     try:
-        _run_mkvmerge(mkv_cmd, timeout=timeout, skip_check=skip_check)
-        ffmpeg_cmd = [
-            ffmpeg_bin,
-            "-hide_banner",
-            "-y",
-            "-i",
-            str(temp_mkv),
-            "-c",
-            "copy",
-            "-movflags",
-            "+faststart",
-            str(output_path),
+        ff_proc = subprocess.Popen(
+            ffmpeg_cmd,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.PIPE,
+            text=True,
+        )
+        if skip_check:
+            skip_check()
+
+        mkv_cmd = [
+            mkvmerge_bin,
+            "-q",
+            "-o",
+            str(fifo),
+            "--split",
+            spec,
+            str(path),
         ]
-        _run_ffmpeg_logged(ffmpeg_cmd, timeout=timeout, skip_check=skip_check)
+        deadline = time.time() + timeout
+        try:
+            mkv_proc = subprocess.run(
+                mkv_cmd,
+                capture_output=True,
+                text=True,
+                timeout=max(1, int(deadline - time.time())),
+            )
+        except subprocess.TimeoutExpired as exc:
+            raise SplitError(f"mkvmerge timed out after {timeout}s") from exc
+
+        assert ff_proc is not None
+        try:
+            ff_stderr = ff_proc.communicate(timeout=max(1, int(deadline - time.time())))[1]
+        except subprocess.TimeoutExpired as exc:
+            ff_proc.kill()
+            ff_proc.communicate()
+            raise SplitError(f"ffmpeg timed out after {timeout}s") from exc
+
+        if ff_proc.returncode != 0:
+            tail = (ff_stderr or "")[-600:]
+            mkv_tail = (mkv_proc.stderr or mkv_proc.stdout or "")[-300:]
+            raise SplitError(
+                f"ffmpeg remux failed (exit {ff_proc.returncode}) for {output_path.name}: "
+                f"{tail}; mkvmerge exit {mkv_proc.returncode}: {mkv_tail}"
+            )
+
+        # mkvmerge cannot seek on a fifo and exits 2 after the mux finishes; ffmpeg success is authoritative.
+        if mkv_proc.returncode >= 2:
+            logger.debug(
+                "mkvmerge fifo exit %s for %s (ignored after successful ffmpeg remux)",
+                mkv_proc.returncode,
+                output_path.name,
+            )
+        elif mkv_proc.returncode == 1:
+            tail = (mkv_proc.stderr or mkv_proc.stdout or "").strip()
+            if tail:
+                logger.warning("mkvmerge warnings for %s: %s", output_path.name, tail[-400:])
+
+        if not output_path.exists() or output_path.stat().st_size <= 0:
+            raise SplitError(f"ffmpeg produced no output for {output_path.name}")
     finally:
-        temp_mkv.unlink(missing_ok=True)
+        if ff_proc is not None and ff_proc.poll() is None:
+            ff_proc.kill()
+            ff_proc.communicate()
+        fifo.unlink(missing_ok=True)
 
 
 def iter_upload_parts_sliced(
