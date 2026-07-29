@@ -1,80 +1,26 @@
 #!/usr/bin/env bash
-# Validate fast ffmpeg_slice inside the migradora orchestrator container.
+# Quick ffmpeg_slice validation — production-like path only (plan + split + frame sum).
 #
-# Usage (on VPS or dev machine with migradora running):
+# Usage:
 #   ./scripts/test-ffmpeg-slice.sh /data/downloads/test/test.mp4
 #   ./scripts/test-ffmpeg-slice.sh /data/downloads/test/test.mp4 400000000
 #
-# Second arg = max bytes per part. Default is Filester cap (~9.5 GiB). For small
-# test files, pass ~1/3 of file size (e.g. 400000000 for a 1.4 GB file) to force
-# a multi-part split + merge test.
-#
-# Host path equivalent:
-#   ./scripts/test-ffmpeg-slice.sh ./data/downloads/test/test.mp4
+# For merge tests, boundary hashes, and stress planning see test-ffmpeg-slice-thorough.sh
 set -euo pipefail
 
-CONTAINER="${MIGRADORA_CONTAINER:-migradora-orchestrator}"
-INPUT="${1:-/data/downloads/test/test.mp4}"
-PART_LIMIT="${2:-10200547328}" # ~9.5 GiB default (under Filester's 10 GB cap)
-OUT_DIR="/data/downloads/test/slice-test-$$"
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+# shellcheck source=scripts/test-ffmpeg-slice-lib.sh
+source "$SCRIPT_DIR/test-ffmpeg-slice-lib.sh"
 
-if [[ ! -f "$INPUT" && -f "./data/downloads/${INPUT#./data/downloads/}" ]]; then
-  INPUT="./data/downloads/${INPUT#./data/downloads/}"
-fi
+slice_resolve_input "${1:-}" "${2:-}"
 
-if [[ -f "$INPUT" ]]; then
-  HOST_INPUT="$INPUT"
-  case "$INPUT" in
-    /data/downloads/*) CONTAINER_INPUT="$INPUT" ;;
-    ./data/downloads/*|data/downloads/*)
-      rel="${INPUT#./}"
-      rel="${rel#data/downloads/}"
-      CONTAINER_INPUT="/data/downloads/$rel"
-      ;;
-    *)
-      echo "Put test files under ./data/downloads/ or pass a /data/downloads/... container path." >&2
-      exit 1
-      ;;
-  esac
-else
-  CONTAINER_INPUT="$INPUT"
-  HOST_INPUT=""
-fi
-
-if ! docker ps --format '{{.Names}}' | grep -qx "$CONTAINER"; then
-  echo "Container $CONTAINER is not running." >&2
-  exit 1
-fi
-
-docker exec "$CONTAINER" mkdir -p "$OUT_DIR"
-
-FILE_SIZE="$(docker exec "$CONTAINER" stat -c%s "$CONTAINER_INPUT")"
-SPLIT_LIMIT="$PART_LIMIT"
-if (( FILE_SIZE <= PART_LIMIT )); then
-  SPLIT_LIMIT=$(( FILE_SIZE / 3 ))
-  echo "NOTE: file ($FILE_SIZE bytes) fits in one part at cap $PART_LIMIT."
-  echo "      Using split part limit $SPLIT_LIMIT bytes (~3 parts) for merge test."
-  echo "      Pass an explicit second arg to override."
-  echo
-fi
-
-echo "==> Container: $CONTAINER"
-echo "==> Input:     $CONTAINER_INPUT"
-echo "==> Part cap:  $PART_LIMIT bytes (planning)"
-echo "==> Split cap: $SPLIT_LIMIT bytes (actual split)"
-echo "==> Output:    $OUT_DIR"
-echo
-
-echo "==> 1) Sparse keyframe plan (timed, production part cap)"
+echo "==> 1) Sparse keyframe plan (production part cap)"
 docker exec -i "$CONTAINER" python3 - "$CONTAINER_INPUT" "$PART_LIMIT" <<'PY'
 import sys
 import time
 from pathlib import Path
 
-from migradora.ffmpeg_splitter import (
-    plan_sparse_keyframe_part_starts,
-    probe_duration,
-)
+from migradora.ffmpeg_splitter import plan_sparse_keyframe_part_starts, probe_duration
 
 path = Path(sys.argv[1])
 part_limit = int(sys.argv[2])
@@ -94,29 +40,7 @@ print(f"sparse_plan_sec={elapsed:.2f}")
 PY
 
 echo
-echo "==> 1b) Sparse plan stress (3-way split — honest multi-boundary timing)"
-docker exec -i "$CONTAINER" python3 - "$CONTAINER_INPUT" <<'PY'
-import sys
-import time
-from pathlib import Path
-
-from migradora.ffmpeg_splitter import plan_sparse_keyframe_part_starts, probe_duration
-
-path = Path(sys.argv[1])
-duration = probe_duration(path)
-target_segment_time = max(1, int(duration / 3))
-
-t0 = time.perf_counter()
-starts = plan_sparse_keyframe_part_starts(path, duration, target_segment_time)
-elapsed = time.perf_counter() - t0
-
-print(f"target_segment_sec={target_segment_time}")
-print(f"planned_parts={len(starts)}")
-print(f"sparse_plan_stress_sec={elapsed:.2f}")
-PY
-
-echo
-echo "==> 2) Split into playable parts (timed, source kept)"
+echo "==> 2) Split into playable parts (source kept)"
 docker exec -i "$CONTAINER" python3 - "$CONTAINER_INPUT" "$OUT_DIR" "$SPLIT_LIMIT" <<'PY'
 import sys
 import time
@@ -148,7 +72,7 @@ print(f"split_total_sec={elapsed:.2f}")
 PY
 
 echo
-echo "==> 3) Merge parts with ffmpeg concat (stream copy)"
+echo "==> 3) Part frame sum vs source (overlap => parts_sum > source)"
 docker exec -i "$CONTAINER" python3 - "$CONTAINER_INPUT" "$OUT_DIR" <<'PY'
 import subprocess
 import sys
@@ -157,58 +81,6 @@ from pathlib import Path
 source = Path(sys.argv[1])
 out_dir = Path(sys.argv[2])
 parts = sorted(out_dir.glob(f"{source.stem}.PART*{source.suffix}"))
-if len(parts) < 2:
-    print("only one part; merge skipped")
-    raise SystemExit(0)
-
-list_path = out_dir / "parts.txt"
-lines = [f"file '{p}'" for p in parts]
-list_path.write_text("\n".join(lines) + "\n", encoding="utf-8")
-merged = out_dir / f"{source.stem}.merged{source.suffix}"
-
-cmd = [
-    "ffmpeg", "-hide_banner", "-y",
-    "-f", "concat", "-safe", "0",
-    "-i", str(list_path),
-    "-c", "copy",
-    str(merged),
-]
-proc = subprocess.run(cmd, capture_output=True, text=True)
-if proc.returncode != 0:
-    print(proc.stderr[-800:])
-    raise SystemExit(proc.returncode)
-
-print(f"merged={merged}")
-for p in parts:
-    print(f"  part {p.name}: {p.stat().st_size:,} bytes")
-print(f"  merged size: {merged.stat().st_size:,} bytes")
-PY
-
-echo
-echo "==> 4) Merge integrity (duration + frame counts; overlap => parts_sum > source)"
-docker exec -i "$CONTAINER" python3 - "$CONTAINER_INPUT" "$OUT_DIR" <<'PY'
-import subprocess
-import sys
-from pathlib import Path
-
-source = Path(sys.argv[1])
-out_dir = Path(sys.argv[2])
-parts = sorted(out_dir.glob(f"{source.stem}.PART*{source.suffix}"))
-merged = out_dir / f"{source.stem}.merged{source.suffix}"
-
-def duration(path: Path) -> float:
-    proc = subprocess.run(
-        [
-            "ffprobe", "-v", "error",
-            "-show_entries", "format=duration",
-            "-of", "default=noprint_wrappers=1:nokey=1",
-            str(path),
-        ],
-        capture_output=True,
-        text=True,
-        check=True,
-    )
-    return float(proc.stdout.strip())
 
 def video_packets(path: Path) -> int:
     proc = subprocess.run(
@@ -226,40 +98,20 @@ def video_packets(path: Path) -> int:
     )
     return int(proc.stdout.strip())
 
-src_dur = duration(source)
+if len(parts) < 2:
+    print("only one part produced; boundary overlap check not applicable")
+    raise SystemExit(0)
+
 src_frames = video_packets(source)
 part_frames = sum(video_packets(p) for p in parts)
-parts_dur = sum(duration(p) for p in parts)
-
-print(f"source:  duration={src_dur:.3f}s frames={src_frames}")
-print(f"parts:   duration_sum={parts_dur:.3f}s frames_sum={part_frames}")
-if merged.exists():
-    mrg_dur = duration(merged)
-    mrg_frames = video_packets(merged)
-    print(f"merged:  duration={mrg_dur:.3f}s frames={mrg_frames}")
-    dur_delta = abs(mrg_dur - src_dur)
-    frame_delta = abs(mrg_frames - src_frames)
-    print(f"delta:   duration={dur_delta:.3f}s frames={frame_delta}")
-    if frame_delta == 0 and dur_delta < 0.5:
-        print("PASS: merged matches source (no duplicate/missing frames at boundaries)")
-    elif part_frames > src_frames:
-        print("FAIL: parts contain MORE frames than source (overlap at boundary)")
-    elif part_frames < src_frames:
-        print("FAIL: parts contain FEWER frames than source (gap at boundary)")
-    else:
-        print("WARN: small duration drift; inspect merged playback manually")
+print(f"source_frames={src_frames}")
+print(f"parts_frames_sum={part_frames}")
+if part_frames == src_frames:
+    print("PASS: part frame sum matches source")
+elif part_frames > src_frames:
+    print(f"FAIL: {part_frames - src_frames} extra frame(s) — overlap at boundary(s)")
 else:
-    if part_frames == src_frames:
-        print("PASS: part frame sum matches source")
-    elif part_frames > src_frames:
-        print("FAIL: parts contain MORE frames than source (overlap at boundary)")
-    else:
-        print("FAIL: parts contain FEWER frames than source (gap at boundary)")
+    print(f"FAIL: {src_frames - part_frames} missing frame(s) — gap at boundary(s)")
 PY
 
-echo
-echo "==> Done. Artifacts in $OUT_DIR (remove manually when finished)."
-if [[ -n "$HOST_INPUT" ]]; then
-  host_out="./data/downloads/${OUT_DIR#/data/downloads/}"
-  echo "Host path: $host_out"
-fi
+slice_print_done
