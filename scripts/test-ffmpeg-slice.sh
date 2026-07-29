@@ -50,7 +50,7 @@ echo
 
 docker exec "$CONTAINER" mkdir -p "$OUT_DIR"
 
-echo "==> 1) Sparse keyframe plan (timed)"
+echo "==> 1) Sparse keyframe plan (timed, production part cap)"
 docker exec -i "$CONTAINER" python3 - "$CONTAINER_INPUT" "$PART_LIMIT" <<'PY'
 import sys
 import time
@@ -76,6 +76,28 @@ print(f"target_segment_sec={target_segment_time}")
 print(f"planned_parts={len(starts)}")
 print(f"part_starts={', '.join(f'{s:.3f}' for s in starts)}")
 print(f"sparse_plan_sec={elapsed:.2f}")
+PY
+
+echo
+echo "==> 1b) Sparse plan stress (3-way split — honest multi-boundary timing)"
+docker exec -i "$CONTAINER" python3 - "$CONTAINER_INPUT" <<'PY'
+import sys
+import time
+from pathlib import Path
+
+from migradora.ffmpeg_splitter import plan_sparse_keyframe_part_starts, probe_duration
+
+path = Path(sys.argv[1])
+duration = probe_duration(path)
+target_segment_time = max(1, int(duration / 3))
+
+t0 = time.perf_counter()
+starts = plan_sparse_keyframe_part_starts(path, duration, target_segment_time)
+elapsed = time.perf_counter() - t0
+
+print(f"target_segment_sec={target_segment_time}")
+print(f"planned_parts={len(starts)}")
+print(f"sparse_plan_stress_sec={elapsed:.2f}")
 PY
 
 echo

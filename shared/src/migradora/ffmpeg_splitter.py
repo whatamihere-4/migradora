@@ -20,12 +20,27 @@ logger = logging.getLogger("migradora.ffmpeg_splitter")
 
 _TARGET_FACTORS = (0.90, 0.75, 0.60)
 _KEYFRAME_EPS = 0.001
-_SPARSE_WINDOW_BEFORE_SEC = 60.0
-_SPARSE_WINDOW_AFTER_SEC = 120.0
+_SPARSE_INITIAL_WINDOW_SEC = 180.0
+_SPARSE_MAX_WINDOW_SEC = 300.0
+_SPARSE_LOOKBACK_SEC = 30.0
+_SPARSE_FORWARD_STEP_SEC = 150.0
 
 
 class SplitError(RuntimeError):
     pass
+
+
+class _KeyframeCache:
+    """Accumulate keyframe PTS values across sparse probes for one file."""
+
+    def __init__(self) -> None:
+        self._times: set[float] = {0.0}
+
+    def add(self, times: list[float]) -> None:
+        self._times.update(times)
+
+    def at_or_after(self, target_sec: float) -> float | None:
+        return _select_keyframe_at_or_after(sorted(self._times), target_sec)
 
 
 def probe_duration(path: str | Path, *, ffprobe_bin: str = "ffprobe") -> float:
@@ -196,45 +211,53 @@ def find_keyframe_at_or_after(
     target_segment_time: float,
     *,
     ffprobe_bin: str = "ffprobe",
+    cache: _KeyframeCache | None = None,
 ) -> float | None:
-    """Find the first keyframe at or after ``target_sec`` using sparse ffprobe windows."""
+    """Find the first keyframe at or after ``target_sec`` using capped ffprobe windows."""
     if duration <= 0:
         return None
 
     target_sec = max(0.0, min(target_sec, duration))
-    margin_before = max(_SPARSE_WINDOW_BEFORE_SEC, target_segment_time * 0.25)
-    margin_after = max(_SPARSE_WINDOW_AFTER_SEC, target_segment_time * 1.5)
+    if cache is not None:
+        cached = cache.at_or_after(target_sec)
+        if cached is not None:
+            return cached
 
-    windows: list[tuple[float, float]] = [
-        (max(0.0, target_sec - margin_before), min(duration, target_sec + margin_after)),
-        (max(0.0, target_sec - margin_before * 2), min(duration, target_sec + margin_after * 2)),
-        (target_sec, duration),
-    ]
+    window = min(
+        _SPARSE_MAX_WINDOW_SEC,
+        max(_SPARSE_INITIAL_WINDOW_SEC, min(target_segment_time * 0.15, 240.0)),
+    )
+    cursor = max(0.0, target_sec - _SPARSE_LOOKBACK_SEC)
 
-    seen: set[tuple[float, float]] = set()
-    for start_sec, end_sec in windows:
-        key = (round(start_sec, 3), round(end_sec, 3))
-        if key in seen:
-            continue
-        seen.add(key)
-
+    while cursor < duration - _KEYFRAME_EPS:
+        end = min(duration, cursor + window)
         times = _probe_keyframes_in_interval(
             path,
-            start_sec=start_sec,
-            end_sec=end_sec,
+            start_sec=cursor,
+            end_sec=end,
             duration=duration,
             ffprobe_bin=ffprobe_bin,
         )
+        if cache is not None:
+            cache.add(times)
+
         picked = _select_keyframe_at_or_after(times, target_sec)
         if picked is not None:
             return picked
+
+        if end >= duration - _KEYFRAME_EPS:
+            break
+        cursor = max(cursor + _SPARSE_FORWARD_STEP_SEC, end - _SPARSE_LOOKBACK_SEC)
 
     logger.warning(
         "Sparse keyframe lookup missed target %.3fs in %s; falling back to full scan",
         target_sec,
         Path(path).name,
     )
-    return _select_keyframe_at_or_after(probe_keyframe_times(path, ffprobe_bin=ffprobe_bin), target_sec)
+    full = probe_keyframe_times(path, ffprobe_bin=ffprobe_bin)
+    if cache is not None:
+        cache.add(full)
+    return _select_keyframe_at_or_after(full, target_sec)
 
 
 def _keyframes_from_packets(path: str | Path, *, ffprobe_bin: str) -> list[float]:
@@ -367,6 +390,7 @@ def plan_sparse_keyframe_part_starts(
     if duration <= 0:
         return [0.0]
 
+    cache = _KeyframeCache()
     starts = [0.0]
     while starts[-1] < duration - _KEYFRAME_EPS:
         target = starts[-1] + max(1.0, target_segment_time)
@@ -379,6 +403,7 @@ def plan_sparse_keyframe_part_starts(
             duration,
             target_segment_time,
             ffprobe_bin=ffprobe_bin,
+            cache=cache,
         )
         if next_start is None:
             break
@@ -389,6 +414,7 @@ def plan_sparse_keyframe_part_starts(
                 duration,
                 target_segment_time,
                 ffprobe_bin=ffprobe_bin,
+                cache=cache,
             )
             if next_start is None or next_start <= starts[-1] + _KEYFRAME_EPS:
                 break
