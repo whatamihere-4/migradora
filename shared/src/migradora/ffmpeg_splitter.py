@@ -56,6 +56,44 @@ def probe_duration(path: str | Path, *, ffprobe_bin: str = "ffprobe") -> float:
     return dur
 
 
+def _keyframes_from_packets(path: str | Path, *, ffprobe_bin: str) -> list[float]:
+    proc = subprocess.run(
+        [
+            ffprobe_bin,
+            "-v",
+            "error",
+            "-select_streams",
+            "v:0",
+            "-show_entries",
+            "packet=pts_time,flags",
+            "-of",
+            "csv=p=0",
+            str(path),
+        ],
+        capture_output=True,
+        text=True,
+        timeout=3600,
+    )
+    if proc.returncode != 0:
+        return []
+
+    times: list[float] = []
+    for line in (proc.stdout or "").splitlines():
+        line = line.strip()
+        if not line:
+            continue
+        parts = line.split(",", 1)
+        if len(parts) != 2 or "K" not in parts[1]:
+            continue
+        try:
+            t = float(parts[0])
+        except ValueError:
+            continue
+        if t >= -_KEYFRAME_EPS:
+            times.append(t)
+    return times
+
+
 def probe_keyframe_times(path: str | Path, *, ffprobe_bin: str = "ffprobe") -> list[float]:
     """Return sorted presentation timestamps of video keyframes."""
     proc = subprocess.run(
@@ -68,7 +106,7 @@ def probe_keyframe_times(path: str | Path, *, ffprobe_bin: str = "ffprobe") -> l
             "-select_streams",
             "v:0",
             "-show_entries",
-            "frame=pkt_pts_time",
+            "frame=pts_time",
             "-of",
             "csv=p=0",
             str(path),
@@ -94,9 +132,15 @@ def probe_keyframe_times(path: str | Path, *, ffprobe_bin: str = "ffprobe") -> l
             times.append(t)
 
     if not times:
+        times = _keyframes_from_packets(path, ffprobe_bin=ffprobe_bin)
+
+    if not times:
         raise SplitError(f"No video keyframes found in {Path(path).name}")
 
-    return sorted(set(times))
+    times = sorted(set(times))
+    if times[0] > _KEYFRAME_EPS:
+        times = [0.0, *times]
+    return times
 
 
 def plan_keyframe_part_starts(
