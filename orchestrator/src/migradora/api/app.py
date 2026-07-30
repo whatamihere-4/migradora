@@ -65,8 +65,8 @@ def create_app(settings: Settings, orchestrator: Orchestrator) -> FastAPI:
             "queue_state": queue.get_queue_state()[0].value,
         }
 
-    def _job_payload(record) -> dict[str, Any]:
-        return {
+    def _job_payload(record, *, job_logs: list[str] | None = None) -> dict[str, Any]:
+        payload = {
             "id": record.id,
             "filename": record.filename,
             "gofile_path": record.gofile_path,
@@ -78,6 +78,9 @@ def create_app(settings: Settings, orchestrator: Orchestrator) -> FastAPI:
             "last_error": record.last_error,
             "filester_slug": record.filester_slug,
         }
+        if job_logs:
+            payload["job_logs"] = job_logs
+        return payload
 
     @app.get("/status")
     def status() -> dict[str, Any]:
@@ -92,8 +95,11 @@ def create_app(settings: Settings, orchestrator: Orchestrator) -> FastAPI:
         if job_id and phase in ("downloading", "splitting", "uploading"):
             record = queue.get_file(job_id)
             if record:
-                current_job = _job_payload(record)
+                logs = orchestrator.pipeline.job_logs(job_id)
+                current_job = _job_payload(record, job_logs=logs)
                 current_job["status"] = phase
+                current_job["status_text"] = pipeline.get("status_text") or ""
+                current_job["upload_progress"] = pipeline.get("upload_progress")
                 current_job_size = record.size_bytes or 0
 
         incomplete_bytes = queue.get_incomplete_bytes_total()
@@ -155,7 +161,11 @@ def create_app(settings: Settings, orchestrator: Orchestrator) -> FastAPI:
         limit: int = Query(100, ge=1, le=500),
     ) -> dict[str, Any]:
         records = queue.list_files(status=status, limit=limit)
-        return {"jobs": [_job_payload(r) for r in records]}
+        jobs = []
+        for record in records:
+            logs = orchestrator.pipeline.job_logs(record.id)
+            jobs.append(_job_payload(record, job_logs=logs or None))
+        return {"jobs": jobs}
 
     @app.post("/resume")
     def resume() -> dict[str, str]:

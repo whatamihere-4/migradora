@@ -20,6 +20,7 @@ from migradora.size_limits import (
     required_disk_gb,
 )
 from migradora.transfer_stats import TransferTracker, eta_seconds, format_size
+from migradora.upload_progress import UploadProgressReporter
 from migradora.utils import free_disk_gb
 
 from migradora.filester_folders import (
@@ -28,6 +29,7 @@ from migradora.filester_folders import (
     organize_split_parts_into_folder,
 )
 from migradora.job_cleanup import cleanup_job_files, purge_stale_job_dirs, release_job_downloads
+from migradora.job_log import JobLogStore
 
 logger = logging.getLogger("migradora.pipeline")
 
@@ -74,6 +76,14 @@ class PipelineCoordinator:
         self._last_touch_at: float = 0.0
         self._skip_job_id: int | None = None
         self._transfer = TransferTracker()
+        self._job_logs = JobLogStore()
+        self._upload_reporter: UploadProgressReporter | None = None
+
+    def _append_job_log(self, job_id: int, line: str) -> None:
+        self._job_logs.append(job_id, line)
+
+    def job_logs(self, job_id: int, *, tail: int = 22) -> list[str]:
+        return self._job_logs.get(job_id, tail=tail)
 
     def _touch_job_progress(self, job_id: int) -> None:
         """Keep stale-job detection and health heartbeats fresh during long transfers."""
@@ -116,6 +126,13 @@ class PipelineCoordinator:
             "phase_eta_sec": phase_eta_sec,
             "avg_download_bps": self._transfer.download_bps,
             "avg_upload_bps": self._transfer.upload_bps,
+            "job_logs": self._job_logs.get(self._current_job_id or 0, tail=22)
+            if self._current_job_id
+            else [],
+            "status_text": self._upload_reporter.status_text if self._upload_reporter else "",
+            "upload_progress": self._upload_reporter.snapshot()
+            if self._upload_reporter
+            else None,
         }
 
     def stop(self) -> None:
@@ -146,6 +163,7 @@ class PipelineCoordinator:
         self._progress_total = 0
         self._upload_bytes_done = 0
         self._upload_bytes_total = 0
+        self._upload_reporter = None
         logger.info("Job %d skipped; local files removed", job_id)
 
     def _skip_job_for_disk(self, job, reason: str) -> None:
@@ -221,6 +239,7 @@ class PipelineCoordinator:
                 self._progress_total = 0
                 self._upload_bytes_done = 0
                 self._upload_bytes_total = 0
+                self._upload_reporter = None
                 if job.attempts >= self.settings.download_max_retries:
                     self.queue.mark_failed(job.id, str(exc), retry=False)
                 else:
@@ -325,8 +344,6 @@ class PipelineCoordinator:
         )
         self._transfer.complete_phase("download", actual_size)
 
-        self._transfer.complete_phase("download", actual_size)
-
         self._progress_bytes = 0
         self._progress_total = actual_size
         self._upload_bytes_done = 0
@@ -334,6 +351,38 @@ class PipelineCoordinator:
 
         slugs: list[str] = []
         upload_phase_started = False
+        folder_path = _job_upload_folder_path(job) or job.gofile_path or "root"
+        self._upload_reporter = UploadProgressReporter(
+            folder_name=folder_path.rsplit("/", 1)[-1] if "/" in folder_path else folder_path,
+        )
+        if actual_size > self.settings.filester_max_file_bytes:
+            self._upload_reporter.set_splitting(source_bytes=actual_size)
+
+        def job_log(line: str, jid: int = job.id) -> None:
+            self._append_job_log(jid, line)
+            if self._upload_reporter:
+                self._upload_reporter.set_activity(line)
+
+        def on_parts_planned(count: int) -> None:
+            if self._upload_reporter:
+                self._upload_reporter.prepare_parts(count)
+
+        def on_split_progress(
+            part_index: int,
+            done_bytes: int,
+            total_bytes: int,
+            label: str,
+            part_count: int,
+        ) -> None:
+            if self._upload_reporter:
+                self._upload_reporter.set_split_part_progress(
+                    part_index,
+                    label=label,
+                    done_bytes=done_bytes,
+                    total_bytes=total_bytes,
+                    part_count=part_count,
+                )
+
         with FilesterClient(
             self.settings.filester_api_key,
             self.settings.filester_api_base,
@@ -355,6 +404,10 @@ class PipelineCoordinator:
                 folder_id,
                 _job_upload_folder_path(job) or job.gofile_path,
             )
+            job_log(
+                f"[Filester] Split/upload to folder {folder_id} "
+                f"({_job_upload_folder_path(job) or job.gofile_path or 'root'})"
+            )
             was_split = False
             upload_responses: list[dict] = []
             parts_iter = iter(
@@ -369,6 +422,9 @@ class PipelineCoordinator:
                     ffprobe_bin=self.settings.ffprobe_bin,
                     mkvmerge_bin=self.settings.mkvmerge_bin,
                     ffmpeg_timeout=self.settings.ffmpeg_timeout_sec,
+                    on_log=job_log,
+                    on_parts_planned=on_parts_planned,
+                    on_split_progress=on_split_progress,
                 )
             )
             while True:
@@ -387,6 +443,14 @@ class PipelineCoordinator:
                 part_count = int(part.get("part_count") or 1)
                 part_base_done = self._upload_bytes_done
 
+                if part_count > 1:
+                    self._upload_reporter.register_part(
+                        part_index,
+                        part["filename"],
+                        part_size,
+                        part_count,
+                    )
+
                 self._current_phase = "uploading"
                 if not upload_phase_started:
                     self._transfer.begin_phase("upload")
@@ -396,6 +460,10 @@ class PipelineCoordinator:
                 self._progress_bytes = 0
                 self._progress_total = part_size
                 if part_count > 1:
+                    line = (
+                        f"[Filester] Uploading part {part_index}/{part_count}: "
+                        f"{part['filename']} ({format_size(part_size)})"
+                    )
                     logger.info(
                         "Uploading part %d/%d: %s (%s)",
                         part_index,
@@ -404,11 +472,16 @@ class PipelineCoordinator:
                         format_size(part_size),
                     )
                 else:
+                    line = (
+                        f"[Filester] Uploading {part['filename']} "
+                        f"({format_size(part_size)})"
+                    )
                     logger.info(
                         "Uploading %s (%s)",
                         part["filename"],
                         format_size(part_size),
                     )
+                job_log(line)
 
                 def on_upload_progress(done: int, total: int) -> None:
                     self._check_skip(job.id)
@@ -418,11 +491,30 @@ class PipelineCoordinator:
                     self._upload_bytes_done = cumulative
                     self._transfer.update_progress("upload", cumulative)
                     self._touch_job_progress(job.id)
+                    speed = self._transfer.upload_bps
+                    eta = eta_seconds(max(0, total - done), speed)
+                    if self._upload_reporter:
+                        if part_count > 1:
+                            self._upload_reporter.part_progress(
+                                part_index,
+                                done,
+                                total,
+                                speed_bps=speed,
+                                eta_sec=eta,
+                            )
+                        else:
+                            self._upload_reporter.single_progress(
+                                done,
+                                total,
+                                speed_bps=speed,
+                                eta_sec=eta,
+                            )
 
                 result = filester.upload_file(
                     part_path,
                     folder_id=folder_id,
                     on_progress=on_upload_progress,
+                    on_log=job_log,
                 )
                 upload_responses.append(result)
                 slug = result.get("slug", "")
@@ -432,6 +524,8 @@ class PipelineCoordinator:
                     raise RuntimeError(f"Upload verification failed: {slug}")
                 slugs.append(slug)
                 self._upload_bytes_done = part_base_done + part_size
+                if part_count > 1 and self._upload_reporter:
+                    self._upload_reporter.complete_part(part_index)
                 cleanup_dir(part_path)
                 filester.reset_connections()
 
@@ -459,4 +553,6 @@ class PipelineCoordinator:
         self._progress_total = 0
         self._upload_bytes_done = 0
         self._upload_bytes_total = 0
+        self._upload_reporter = None
+        job_log(f"Job complete: {job.filename}")
         logger.info("Job %d complete: %s", job.id, job.filename)

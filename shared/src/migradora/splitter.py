@@ -14,6 +14,12 @@ logger = logging.getLogger("migradora.splitter")
 _CHUNK_SIZE = 8 * 1024 * 1024
 _SKIP_CHECK_EVERY_CHUNKS = 32
 
+
+def _emit_log(on_log: Callable[[str], None] | None, message: str) -> None:
+    logger.info("%s", message)
+    if on_log:
+        on_log(message)
+
 _SPLIT_MODE_ALIASES = {
     "splice": "bytes",
     "byte": "bytes",
@@ -82,6 +88,9 @@ def _iter_upload_parts_bytes(
     skip_check: Callable[[], None] | None,
     *,
     delete_source: bool,
+    on_log: Callable[[str], None] | None = None,
+    on_parts_planned: Callable[[int], None] | None = None,
+    on_split_progress: Callable[[int, int, int, str, int], None] | None = None,
 ) -> Iterator[dict]:
     total_size = source.stat().st_size
     if total_size <= part_size_bytes:
@@ -108,20 +117,28 @@ def _iter_upload_parts_bytes(
         num_parts,
         part_size_bytes,
     )
+    _emit_log(
+        on_log,
+        f"Splitting {source.name} into {num_parts} byte part(s) "
+        f"of up to {part_size_bytes:,} bytes each",
+    )
+    if on_parts_planned:
+        on_parts_planned(num_parts)
 
     for idx in range(num_parts):
         offset = idx * part_size_bytes
         part_size = min(part_size_bytes, total_size - offset)
         part_name = f"{part_prefix}.part{idx + 1:03d}"
         part_path = output_dir / part_name
-        logger.info(
-            "Extracting part %d/%d: %s (%d bytes)",
-            idx + 1,
-            num_parts,
-            part_name,
-            part_size,
+        if on_split_progress:
+            on_split_progress(idx + 1, 0, part_size, part_name, num_parts)
+        _emit_log(
+            on_log,
+            f"Extracting part {idx + 1}/{num_parts}: {part_name} ({part_size:,} bytes)",
         )
         _extract_part(source, part_path, offset, part_size, skip_check=skip_check)
+        if on_split_progress:
+            on_split_progress(idx + 1, part_size, part_size, part_name, num_parts)
         yield {
             "path": str(part_path),
             "filename": part_name,
@@ -135,7 +152,7 @@ def _iter_upload_parts_bytes(
 
     if delete_source:
         source.unlink(missing_ok=True)
-        logger.info("Removed source after splitting: %s", source.name)
+        _emit_log(on_log, f"Removed source after splitting: {source.name}")
 
 
 def iter_upload_parts(
@@ -151,6 +168,9 @@ def iter_upload_parts(
     mkvmerge_bin: str = "mkvmerge",
     ffmpeg_timeout: int = 7200,
     delete_source: bool = True,
+    on_log: Callable[[str], None] | None = None,
+    on_parts_planned: Callable[[int], None] | None = None,
+    on_split_progress: Callable[[int, int, int, str, int], None] | None = None,
 ) -> Iterator[dict]:
     """
     Yield upload parts one at a time.
@@ -180,6 +200,9 @@ def iter_upload_parts(
             ffmpeg_timeout=ffmpeg_timeout,
             skip_check=skip_check,
             delete_source=delete_source,
+            on_log=on_log,
+            on_parts_planned=on_parts_planned,
+            on_split_progress=on_split_progress,
         )
         return
 
@@ -190,6 +213,9 @@ def iter_upload_parts(
         base_name,
         skip_check,
         delete_source=delete_source,
+        on_log=on_log,
+        on_parts_planned=on_parts_planned,
+        on_split_progress=on_split_progress,
     )
 
 

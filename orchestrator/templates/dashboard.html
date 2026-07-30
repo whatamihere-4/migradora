@@ -107,6 +107,60 @@
     .job-links { margin-top: 0.35rem; font-size: 0.78rem; }
     .job-links a { color: var(--accent); text-decoration: none; }
     .job-links a:hover { text-decoration: underline; }
+    .progress-log {
+      margin-top: 0.45rem;
+      padding: 0.45rem 0.55rem;
+      border: 1px solid var(--border);
+      border-radius: 6px;
+      background: rgba(255, 255, 255, 0.02);
+      color: var(--muted);
+      font-size: 0.72rem;
+      font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+      line-height: 1.35;
+      max-height: 92px;
+      overflow-y: auto;
+      white-space: pre-wrap;
+      word-break: break-word;
+      display: none;
+    }
+    .progress-now {
+      margin-top: 0.45rem;
+      padding: 0.45rem 0.55rem;
+      border: 1px solid var(--border);
+      border-radius: 6px;
+      background: rgba(109, 93, 252, 0.08);
+      color: var(--text);
+      font-size: 0.76rem;
+      line-height: 1.4;
+      display: none;
+    }
+    .upload-overall-label {
+      font-size: 0.68rem; font-weight: 600; color: var(--muted);
+      margin-top: 0.35rem; letter-spacing: 0.02em; text-transform: uppercase;
+      display: none;
+    }
+    .upload-parts-list {
+      margin-top: 0.45rem; display: none; flex-direction: column; gap: 0.32rem;
+    }
+    .upload-part-row {
+      display: grid; grid-template-columns: minmax(0, 1fr) 5rem 2.2rem;
+      align-items: center; gap: 0.45rem; font-size: 0.68rem;
+    }
+    .upload-part-label {
+      overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: var(--muted);
+    }
+    .upload-part-row.uploading .upload-part-label,
+    .upload-part-row.splitting .upload-part-label { color: var(--accent); font-weight: 600; }
+    .upload-part-row.done .upload-part-label { color: var(--success); }
+    .upload-part-bar-wrap { height: 4px; }
+    .upload-part-bar {
+      height: 100%; background: var(--accent); border-radius: 2px;
+      transition: width 0.35s ease; width: 0%;
+    }
+    .upload-part-row.done .upload-part-bar { background: var(--success); }
+    .upload-part-row.pending .upload-part-bar { background: var(--border); width: 0 !important; }
+    .upload-part-pct { text-align: right; color: var(--muted); font-variant-numeric: tabular-nums; }
+    .upload-detail { font-size: 0.75rem; color: var(--muted); margin-top: 0.3rem; }
     .empty { text-align: center; color: var(--muted); padding: 2rem; font-size: 0.85rem; }
     .filter-row { display: flex; gap: 0.4rem; flex-wrap: wrap; margin-bottom: 0.75rem; }
     .filter-row button { padding: 0.35rem 0.65rem; font-size: 0.75rem; }
@@ -155,6 +209,140 @@
     const FILTERS = ['all', 'pending', 'downloading', 'uploading', 'uploaded', 'failed', 'skipped'];
     let activeFilter = 'all';
     let refreshTimer = null;
+    const LOG_SCROLL_EPS = 8;
+
+    function logIsPinnedToBottom(logEl) {
+      const max = logEl.scrollHeight - logEl.clientHeight;
+      if (max <= 0) return true;
+      return max - logEl.scrollTop <= LOG_SCROLL_EPS;
+    }
+
+    function attachLogScrollBehavior(logEl) {
+      if (!logEl || logEl.dataset.logScrollBound) return;
+      logEl.dataset.logScrollBound = '1';
+      logEl.addEventListener('scroll', () => {
+        logEl.dataset.logFollow = logIsPinnedToBottom(logEl) ? '1' : '0';
+      });
+    }
+
+    function renderUploadProgress(container, p) {
+      if (!container) return;
+      const barEl = container.querySelector('.progress-bar-main');
+      const detailEl = container.querySelector('.upload-detail');
+      const partsEl = container.querySelector('.upload-parts-list');
+      const overallLabel = container.querySelector('.upload-overall-label');
+      if (!barEl || !detailEl) return;
+
+      if (!p || p.type !== 'upload') {
+        if (partsEl) { partsEl.style.display = 'none'; partsEl.innerHTML = ''; }
+        if (overallLabel) overallLabel.style.display = 'none';
+        barEl.classList.add('indeterminate');
+        barEl.style.width = '';
+        detailEl.textContent = '';
+        return;
+      }
+
+      const isSplit = p.mode === 'split' && Array.isArray(p.parts) && p.parts.length > 0;
+      if (overallLabel) {
+        if (isSplit) {
+          overallLabel.style.display = 'block';
+          overallLabel.textContent = p.phase === 'splitting'
+            ? (p.label || 'Splitting for Filester upload')
+            : `Overall upload${p.part_count ? ` · ${p.part_count} parts` : ''}`;
+        } else {
+          overallLabel.style.display = 'none';
+        }
+      }
+
+      if (partsEl) {
+        if (isSplit) {
+          partsEl.style.display = 'flex';
+          partsEl.innerHTML = p.parts.map(part => {
+            const st = part.status || 'pending';
+            const pct = part.percent != null ? part.percent : 0;
+            const lbl = part.label || `Part ${part.index}`;
+            const sizeHint = part.size_fmt ? ` (${part.size_fmt})` : '';
+            return `<div class="upload-part-row ${esc(st)}">` +
+              `<span class="upload-part-label" title="${esc(lbl + sizeHint)}">${esc(lbl)}</span>` +
+              `<div class="progress-wrap upload-part-bar-wrap">` +
+              `<div class="upload-part-bar" style="width:${Math.max(0, Math.min(100, pct))}%"></div>` +
+              `</div>` +
+              `<span class="upload-part-pct">${st === 'pending' ? '…' : pct.toFixed(0) + '%'}</span>` +
+              `</div>`;
+          }).join('');
+        } else {
+          partsEl.style.display = 'none';
+          partsEl.innerHTML = '';
+        }
+      }
+
+      if (p.phase === 'splitting') {
+        barEl.classList.add('indeterminate');
+        barEl.style.width = '';
+        const bits = [p.source_fmt ? `Source ${p.source_fmt}` : 'Preparing parts'];
+        if (p.folder_name) bits.push(`Folder: ${p.folder_name}`);
+        detailEl.textContent = bits.join('  ·  ');
+        return;
+      }
+
+      barEl.classList.remove('indeterminate');
+      if (p.percent !== undefined) {
+        barEl.style.width = Math.max(0, Math.min(100, p.percent)) + '%';
+      } else {
+        barEl.classList.add('indeterminate');
+        barEl.style.width = '';
+      }
+
+      const bits = [];
+      if (p.uploaded_fmt && p.total_fmt) bits.push(`${p.uploaded_fmt} / ${p.total_fmt}`);
+      if (p.speed_fmt) bits.push(p.speed_fmt);
+      if (p.eta !== undefined && p.eta > 0) bits.push(`ETA ${p.eta}s`);
+      if (p.folder_name) bits.push(`Folder: ${p.folder_name}`);
+      if (isSplit && p.current_part && p.part_count) {
+        bits.unshift(`Part ${p.current_part}/${p.part_count} uploading`);
+      }
+      detailEl.textContent = bits.join('  ·  ');
+    }
+
+    function renderJobActivity(container, statusText, logs) {
+      if (!container) return;
+      const nowEl = container.querySelector('.progress-now');
+      const logEl = container.querySelector('.progress-log');
+      if (statusText) {
+        nowEl.style.display = 'block';
+        nowEl.textContent = statusText;
+      } else {
+        nowEl.style.display = 'none';
+        nowEl.textContent = '';
+      }
+      renderJobLogs(logEl, logs);
+    }
+
+    function renderJobLogs(logEl, logs) {
+      if (!logEl) return;
+      attachLogScrollBehavior(logEl);
+      if (!logs || !logs.length) {
+        logEl.style.display = 'none';
+        logEl.textContent = '';
+        logEl.dataset.logFollow = '';
+        return;
+      }
+      logEl.style.display = 'block';
+      const follow = logEl.dataset.logFollow !== '0';
+      const prevST = logEl.scrollTop;
+      const prevSH = logEl.scrollHeight;
+      logEl.textContent = logs.slice(-22).join('\n');
+      requestAnimationFrame(() => {
+        if (follow) {
+          logEl.dataset.logFollow = '1';
+          logEl.scrollTop = logEl.scrollHeight;
+        } else {
+          const d = logEl.scrollHeight - prevSH;
+          const max = Math.max(0, logEl.scrollHeight - logEl.clientHeight);
+          logEl.scrollTop = Math.max(0, Math.min(max, prevST + d));
+        }
+      });
+    }
 
     function esc(s) {
       return String(s ?? '').replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;');
@@ -255,18 +443,21 @@
 
     function renderJobs(jobs, pipeline, currentJob, eta) {
       const list = document.getElementById('jobs-list');
+      const currentId = pipeline && pipeline.current_job_id;
+      const phase = pipeline && pipeline.phase;
       let filtered = activeFilter === 'all' ? jobs : jobs.filter(j => j.status === activeFilter);
-      if (currentJob && activeFilter !== 'all' && currentJob.status === activeFilter
-          && !filtered.some(j => j.id === currentJob.id)) {
-        filtered = [currentJob, ...filtered];
+      if (currentJob && activeFilter !== 'all' && !filtered.some(j => j.id === currentJob.id)) {
+        const isPipelineCurrent = pipeline && pipeline.current_job_id === currentJob.id;
+        const phaseMatch = currentJob.status === activeFilter
+          || (isPipelineCurrent && activeFilter === 'uploading'
+            && (phase === 'splitting' || phase === 'uploading'));
+        if (phaseMatch) filtered = [currentJob, ...filtered];
       }
       const sorted = [...filtered].sort((a, b) => a.id - b.id);
       if (!sorted.length) {
         list.innerHTML = '<div class="empty">No jobs in this filter</div>';
         return;
       }
-      const currentId = pipeline && pipeline.current_job_id;
-      const phase = pipeline && pipeline.phase;
       const progBytes = pipeline && pipeline.progress_bytes || 0;
       const progTotal = pipeline && pipeline.progress_total || 0;
       const phaseEta = eta && eta.phase_label;
@@ -274,27 +465,42 @@
       list.innerHTML = sorted.map(j => {
         const isCurrent = currentId === j.id;
         const isActive = isCurrent && (phase === 'downloading' || phase === 'splitting' || phase === 'uploading');
+        const uploadProgress = isCurrent ? (pipeline.upload_progress || j.upload_progress) : j.upload_progress;
+        const statusText = isCurrent ? (pipeline.status_text || j.status_text || '') : (j.status_text || '');
         const parts = (j.filester_slug || []).length;
         const partHint = parts > 1 ? ` (${parts} parts)` : parts === 1 ? '' : '';
         const links = (j.filester_slug || []).map(s =>
           `<a href="https://filester.me/d/${esc(s)}" target="_blank">${esc(s)}</a>`
         ).join(' · ');
         let progressHtml = '';
-        if (isActive && progTotal > 0) {
-          const pct = Math.min(100, Math.round((progBytes / progTotal) * 100));
-          const etaLine = phaseEta && phaseEta !== '—'
-            ? ` · ETA ${phaseEta} · ${fmtSpeed(phaseSpeed)}`
-            : '';
-          progressHtml = `<div class="progress-wrap"><div class="progress-bar" style="width:${pct}%"></div></div>
-            <div class="meta" style="margin-top:0.25rem">${pct}% · ${fmtBytes(progBytes)} / ${fmtBytes(progTotal)}${etaLine}</div>`;
-        } else if (isActive) {
-          progressHtml = `<div class="progress-wrap"><div class="progress-bar indeterminate"></div></div>
-            <div class="meta" style="margin-top:0.25rem">Starting…</div>`;
+        if (isActive && (uploadProgress || phase === 'downloading')) {
+          if (phase === 'downloading') {
+            const pct = progTotal > 0 ? Math.min(100, Math.round((progBytes / progTotal) * 100)) : 0;
+            const etaLine = phaseEta && phaseEta !== '—'
+              ? ` · ETA ${phaseEta} · ${fmtSpeed(phaseSpeed)}`
+              : '';
+            progressHtml = `<div class="upload-overall-label">Downloading</div>` +
+              `<div class="progress-wrap"><div class="progress-bar progress-bar-main" style="width:${pct}%"></div></div>` +
+              `<div class="upload-detail">${pct}% · ${fmtBytes(progBytes)} / ${fmtBytes(progTotal)}${etaLine}</div>`;
+          } else {
+            progressHtml = `<div class="upload-overall-label"></div>` +
+              `<div class="progress-wrap"><div class="progress-bar progress-bar-main"></div></div>` +
+              `<div class="upload-parts-list"></div>` +
+              `<div class="upload-detail"></div>`;
+          }
         }
         const skipBtn = canSkip(j)
           ? `<div class="job-actions"><button class="btn skip" data-skip-id="${j.id}" data-skip-name="${esc(j.filename)}">Skip</button></div>`
           : '';
-        return `<div class="job">
+        const logs = Array.isArray(j.job_logs) ? j.job_logs : [];
+        const showActivity = isActive && (statusText || logs.length);
+        const activityHtml = showActivity
+          ? `<div class="job-activity" data-job-activity="${j.id}">` +
+            `<div class="progress-now"></div>` +
+            `<div class="progress-log" data-job-log="${j.id}"></div>` +
+            `</div>`
+          : '';
+        return `<div class="job" data-job-id="${j.id}">
           <div class="job-header">
             <div>
               <div class="job-title">#${j.id} ${esc(j.filename)}${partHint}</div>
@@ -305,9 +511,24 @@
             </div>
             ${skipBtn}
           </div>
-          ${progressHtml}
+          ${progressHtml ? `<div class="job-upload-progress" data-job-upload="${j.id}">${progressHtml}</div>` : ''}
+          ${activityHtml}
         </div>`;
       }).join('');
+      sorted.forEach(j => {
+        const isCurrent = currentId === j.id;
+        const uploadProgress = isCurrent ? (pipeline.upload_progress || j.upload_progress) : j.upload_progress;
+        const statusText = isCurrent ? (pipeline.status_text || j.status_text || '') : (j.status_text || '');
+        const logs = Array.isArray(j.job_logs) ? j.job_logs : [];
+        const uploadEl = list.querySelector(`[data-job-upload="${j.id}"]`);
+        if (uploadEl && uploadProgress) {
+          renderUploadProgress(uploadEl, uploadProgress);
+        }
+        const activityEl = list.querySelector(`[data-job-activity="${j.id}"]`);
+        if (activityEl) {
+          renderJobActivity(activityEl, statusText, logs);
+        }
+      });
     }
 
     async function refresh() {
@@ -349,7 +570,22 @@
           : '';
         document.getElementById('pipeline-meta').innerHTML =
           phaseLabel + progLabel + speedLabel + etaLabel + queueEtaLabel + avgSpeedLabel;
-        renderJobs(jobsResp.jobs || [], p, status.current_job, eta);
+        const jobs = jobsResp.jobs || [];
+        if (status.current_job && status.current_job.job_logs && status.current_job.job_logs.length) {
+          const cur = jobs.find(j => j.id === status.current_job.id);
+          if (cur) {
+            cur.job_logs = status.current_job.job_logs;
+            cur.status_text = status.current_job.status_text || cur.status_text;
+            cur.upload_progress = status.current_job.upload_progress || cur.upload_progress;
+          } else jobs.unshift(status.current_job);
+        } else if (status.current_job) {
+          const cur = jobs.find(j => j.id === status.current_job.id);
+          if (cur) {
+            cur.status_text = status.current_job.status_text || cur.status_text;
+            cur.upload_progress = status.current_job.upload_progress || cur.upload_progress;
+          }
+        }
+        renderJobs(jobs, p, status.current_job, eta);
         const diskSkipped = st.disk_skipped || 0;
         const retryDiskBtn = document.getElementById('btn-retry-disk');
         retryDiskBtn.disabled = diskSkipped === 0;
@@ -357,7 +593,7 @@
           ? `Retry disk-skipped (${diskSkipped})`
           : 'Retry disk-skipped';
         const active = (st.downloading||0) + (st.splitting||0) + (st.uploading||0);
-        scheduleRefresh(active > 0 ? 5000 : 4000);
+        scheduleRefresh(active > 0 ? 2000 : 4000);
       } catch (e) {
         document.getElementById('jobs-list').innerHTML = `<div class="empty">Error: ${esc(e.message)}</div>`;
         scheduleRefresh(5000);

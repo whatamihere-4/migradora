@@ -10,6 +10,7 @@ from __future__ import annotations
 import logging
 import os
 import subprocess
+import threading
 import time
 from collections.abc import Callable, Iterator
 from pathlib import Path
@@ -22,6 +23,12 @@ _SPARSE_INITIAL_WINDOW_SEC = 180.0
 _SPARSE_MAX_WINDOW_SEC = 300.0
 _SPARSE_LOOKBACK_SEC = 30.0
 _SPARSE_FORWARD_STEP_SEC = 150.0
+
+
+def _emit_log(on_log: Callable[[str], None] | None, message: str) -> None:
+    logger.info("%s", message)
+    if on_log:
+        on_log(message)
 
 
 class SplitError(RuntimeError):
@@ -450,6 +457,8 @@ def _extract_single_segment(
     mkvmerge_bin: str,
     timeout: int,
     skip_check: Callable[[], None] | None = None,
+    on_log: Callable[[str], None] | None = None,
+    on_split_progress: Callable[[int], None] | None = None,
 ) -> None:
     """Extract ``[start_sec, end_sec)`` via mkvmerge → fifo → ffmpeg (no temp file)."""
     if end_sec - start_sec <= _KEYFRAME_EPS:
@@ -476,9 +485,25 @@ def _extract_single_segment(
         "+faststart",
         str(output_path),
     ]
-    logger.info("mkvmerge→fifo→ffmpeg %s %s", output_path.name, spec)
+    _emit_log(on_log, f"mkvmerge→fifo→ffmpeg {output_path.name} {spec}")
 
     ff_proc: subprocess.Popen[str] | None = None
+    stop_poll = threading.Event()
+
+    def _poll_output_size() -> None:
+        last_at = 0.0
+        while not stop_poll.is_set():
+            if on_split_progress and output_path.exists():
+                now = time.time()
+                if now - last_at >= 1.0:
+                    last_at = now
+                    on_split_progress(output_path.stat().st_size)
+            stop_poll.wait(0.5)
+
+    poll_thread = None
+    if on_split_progress:
+        poll_thread = threading.Thread(target=_poll_output_size, daemon=True)
+        poll_thread.start()
     try:
         ff_proc = subprocess.Popen(
             ffmpeg_cmd,
@@ -540,6 +565,9 @@ def _extract_single_segment(
         if not output_path.exists() or output_path.stat().st_size <= 0:
             raise SplitError(f"ffmpeg produced no output for {output_path.name}")
     finally:
+        stop_poll.set()
+        if poll_thread is not None:
+            poll_thread.join(timeout=1.5)
         if ff_proc is not None and ff_proc.poll() is None:
             ff_proc.kill()
             ff_proc.communicate()
@@ -557,6 +585,9 @@ def iter_upload_parts_sliced(
     ffmpeg_timeout: int = 7200,
     skip_check: Callable[[], None] | None = None,
     delete_source: bool = True,
+    on_log: Callable[[str], None] | None = None,
+    on_parts_planned: Callable[[int], None] | None = None,
+    on_split_progress: Callable[[int, int, int, str, int], None] | None = None,
 ) -> Iterator[dict]:
     """Yield one mkvmerge/ffmpeg part at a time (~source + one part on disk)."""
     source = Path(source)
@@ -600,6 +631,11 @@ def iter_upload_parts_sliced(
             trial_segment_time,
             factor,
         )
+        _emit_log(
+            on_log,
+            f"Planning sparse keyframe split for {source.name} "
+            f"(~{trial_segment_time}s target, factor {factor})",
+        )
         trial_starts = plan_sparse_keyframe_part_starts(
             source,
             duration,
@@ -620,6 +656,7 @@ def iter_upload_parts_sliced(
             mkvmerge_bin=mkvmerge_bin,
             timeout=ffmpeg_timeout,
             skip_check=skip_check,
+            on_log=on_log,
         )
         probe_size = probe_path.stat().st_size
         probe_path.unlink(missing_ok=True)
@@ -640,6 +677,11 @@ def iter_upload_parts_sliced(
             segment_time,
             factor,
         )
+        _emit_log(
+            on_log,
+            f"ffmpeg keyframe-aligned slice: {len(trial_starts)} part(s), "
+            f"~{segment_time}s target (factor {factor})",
+        )
         break
 
     if segment_time is None or part_starts is None:
@@ -649,6 +691,8 @@ def iter_upload_parts_sliced(
 
     original = source.name
     num_parts = len(part_starts)
+    if on_parts_planned:
+        on_parts_planned(num_parts)
     for idx, start in enumerate(part_starts):
         if skip_check:
             skip_check()
@@ -659,6 +703,15 @@ def iter_upload_parts_sliced(
 
         part_name = f"{stem}.PART{idx + 1}{ext}"
         part_path = output_dir / part_name
+        part_no = idx + 1
+        if on_split_progress:
+            on_split_progress(part_no, 0, part_size_bytes, part_name, num_parts)
+        _emit_log(on_log, f"Splitting part {part_no}/{num_parts}: {part_name}")
+
+        def _report_size(done_bytes: int) -> None:
+            if on_split_progress:
+                on_split_progress(part_no, done_bytes, part_size_bytes, part_name, num_parts)
+
         _extract_single_segment(
             source,
             part_path,
@@ -669,6 +722,8 @@ def iter_upload_parts_sliced(
             mkvmerge_bin=mkvmerge_bin,
             timeout=ffmpeg_timeout,
             skip_check=skip_check,
+            on_log=on_log,
+            on_split_progress=_report_size,
         )
         part_size = part_path.stat().st_size
         if part_size > part_size_bytes:
@@ -691,4 +746,4 @@ def iter_upload_parts_sliced(
 
     if delete_source:
         source.unlink(missing_ok=True)
-        logger.info("Removed source after splitting: %s", source.name)
+        _emit_log(on_log, f"Removed source after splitting: {source.name}")

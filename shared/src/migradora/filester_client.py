@@ -751,6 +751,7 @@ class FilesterClient:
         folder_id: str | None = None,
         *,
         on_progress: Callable[[int, int], None] | None = None,
+        on_log: Callable[[str], None] | None = None,
     ) -> dict[str, Any]:
         file_path = Path(file_path)
         if not file_path.exists():
@@ -762,11 +763,14 @@ class FilesterClient:
 
         total_size = file_path.stat().st_size
         upload_url = f"{self.api_base}/api/v1/upload"
-        logger.info(
-            "upload %s (%s) -> %s",
-            file_path.name,
-            format_size(total_size),
-            upload_url,
+
+        def emit(line: str) -> None:
+            logger.info("%s", line)
+            if on_log:
+                on_log(line)
+
+        emit(
+            f"[Filester] upload {file_path.name} ({format_size(total_size)}) -> {upload_url}"
         )
         last_log_at = 0.0
         started_at = time.time()
@@ -795,7 +799,7 @@ class FilesterClient:
             try:
                 with open(file_path, "rb") as raw_fh:
                     fh: Any = raw_fh
-                    if on_progress or total_size > 0:
+                    if on_progress or on_log or total_size > 0:
                         def progress_hook(done: int, total: int) -> None:
                             report_progress(done, total)
                             if on_progress:
@@ -810,10 +814,8 @@ class FilesterClient:
                     files = {"file": (file_path.name, fh, "application/octet-stream")}
                     resp = self._client.post("/api/v1/upload", files=files, headers=headers)
                 if resp.status_code == 429:
-                    logger.warning(
-                        "Upload attempt %d rate limited for %s",
-                        attempt + 1,
-                        file_path.name,
+                    emit(
+                        f"[Filester] attempt {attempt + 1} rate limited for {file_path.name}"
                     )
                     time.sleep(self.retry_delay * (2 ** attempt))
                     continue
@@ -825,17 +827,13 @@ class FilesterClient:
                     if isinstance(data, dict):
                         slug = data.get("slug")
                 if slug:
-                    logger.info(
-                        "%s DONE -> https://filester.me/d/%s",
-                        file_path.name,
-                        slug,
-                    )
+                    emit(f"[Filester] {file_path.name} DONE -> https://filester.me/d/{slug}")
                 else:
-                    logger.info("%s DONE", file_path.name)
+                    emit(f"[Filester] {file_path.name} DONE")
                 return result
             except (httpx.HTTPStatusError, httpx.TimeoutException, httpx.NetworkError) as exc:
                 if attempt < self.max_retries:
-                    logger.warning("Upload attempt %d failed: %s", attempt + 1, exc)
+                    emit(f"[Filester] attempt {attempt + 1} failed: {exc}")
                     self.reset_connections()
                     time.sleep(self.retry_delay)
                     continue
