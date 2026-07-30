@@ -2,8 +2,19 @@
 
 from __future__ import annotations
 
+import math
 import time
 from dataclasses import dataclass
+
+
+def format_size(num_bytes: int | float) -> str:
+    """Human-readable size (e.g. ``1.23 GB``)."""
+    b = int(num_bytes)
+    if b == 0:
+        return "0 B"
+    units = ("B", "KB", "MB", "GB", "TB")
+    i = min(int(math.floor(math.log(b, 1024))), len(units) - 1)
+    return f"{b / (1024 ** i):.2f} {units[i]}"
 
 
 def format_speed(bps: float | None) -> str:
@@ -133,13 +144,13 @@ def compute_remaining_bytes(
     remaining_dl = incomplete_bytes
     remaining_ul = incomplete_bytes
 
-    if not current_job_id or phase not in ("downloading", "uploading"):
+    if not current_job_id or phase not in ("downloading", "splitting", "uploading"):
         return TransferRemaining(download_bytes=remaining_dl, upload_bytes=remaining_ul)
 
     size = current_job_size or 0
     if phase == "downloading":
         remaining_dl -= min(progress_bytes, size)
-    elif phase == "uploading":
+    elif phase in ("splitting", "uploading"):
         remaining_dl -= size
         remaining_ul -= min(upload_bytes_done, upload_bytes_total or size)
 

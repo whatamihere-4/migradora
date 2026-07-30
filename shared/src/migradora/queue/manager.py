@@ -438,12 +438,13 @@ class QueueManager:
                 placeholders = ",".join("?" * len(exclude_ids))
                 cur = conn.execute(
                     f"""UPDATE files SET status=?, updated_at=?
-                        WHERE is_part=0 AND status IN (?, ?)
+                        WHERE is_part=0 AND status IN (?, ?, ?)
                         AND id NOT IN ({placeholders})""",
                     (
                         FileStatus.PENDING.value,
                         utc_now(),
                         FileStatus.DOWNLOADING.value,
+                        FileStatus.SPLITTING.value,
                         FileStatus.UPLOADING.value,
                         *exclude_ids,
                     ),
@@ -451,11 +452,12 @@ class QueueManager:
             else:
                 cur = conn.execute(
                     """UPDATE files SET status=?, updated_at=?
-                       WHERE is_part=0 AND status IN (?, ?)""",
+                       WHERE is_part=0 AND status IN (?, ?, ?)""",
                     (
                         FileStatus.PENDING.value,
                         utc_now(),
                         FileStatus.DOWNLOADING.value,
+                        FileStatus.SPLITTING.value,
                         FileStatus.UPLOADING.value,
                     ),
                 )
@@ -470,13 +472,14 @@ class QueueManager:
                 placeholders = ",".join("?" * len(exclude_ids))
                 cur = conn.execute(
                     f"""UPDATE files SET status=?, updated_at=?
-                        WHERE is_part=0 AND status IN (?, ?)
+                        WHERE is_part=0 AND status IN (?, ?, ?)
                         AND datetime(updated_at) < datetime('now', ? || ' seconds')
                         AND id NOT IN ({placeholders})""",
                     (
                         FileStatus.PENDING.value,
                         utc_now(),
                         FileStatus.DOWNLOADING.value,
+                        FileStatus.SPLITTING.value,
                         FileStatus.UPLOADING.value,
                         f"-{timeout_sec}",
                         *exclude_ids,
@@ -485,12 +488,13 @@ class QueueManager:
             else:
                 cur = conn.execute(
                     """UPDATE files SET status=?, updated_at=?
-                       WHERE is_part=0 AND status IN (?, ?)
+                       WHERE is_part=0 AND status IN (?, ?, ?)
                        AND datetime(updated_at) < datetime('now', ? || ' seconds')""",
                     (
                         FileStatus.PENDING.value,
                         utc_now(),
                         FileStatus.DOWNLOADING.value,
+                        FileStatus.SPLITTING.value,
                         FileStatus.UPLOADING.value,
                         f"-{timeout_sec}",
                     ),

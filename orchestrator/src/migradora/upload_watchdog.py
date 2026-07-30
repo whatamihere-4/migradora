@@ -1,4 +1,7 @@
-"""Upload speed watchdog — restart orchestrator when uploads stay too slow."""
+"""Upload speed watchdog — restart orchestrator when Filester uploads stay too slow.
+
+Only reacts during the ``uploading`` pipeline phase (not ``splitting``).
+"""
 
 from __future__ import annotations
 

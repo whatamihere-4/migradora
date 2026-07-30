@@ -102,7 +102,7 @@
     .job-status { color: var(--muted); margin-top: 0.35rem; }
     .job-status.uploaded { color: var(--success); }
     .job-status.failed { color: var(--error); }
-    .job-status.downloading, .job-status.uploading { color: var(--accent); }
+    .job-status.downloading, .job-status.splitting, .job-status.uploading { color: var(--accent); }
     .job-error { margin-top: 0.4rem; font-size: 0.78rem; color: var(--error); word-break: break-word; }
     .job-links { margin-top: 0.35rem; font-size: 0.78rem; }
     .job-links a { color: var(--accent); text-decoration: none; }
@@ -222,7 +222,7 @@
       const items = [
         ['Total', stats.total, ''],
         ['Pending', stats.pending, stats.pending ? 'warn' : ''],
-        ['Active', (stats.downloading||0) + (stats.uploading||0), ''],
+        ['Active', (stats.downloading||0) + (stats.splitting||0) + (stats.uploading||0), ''],
         ['Uploaded', stats.uploaded, 'ok'],
         ['Failed', stats.failed, stats.failed ? 'err' : ''],
         ['Skipped', stats.skipped || 0, ''],
@@ -273,7 +273,7 @@
       const phaseSpeed = pipeline && pipeline.speed_bps;
       list.innerHTML = sorted.map(j => {
         const isCurrent = currentId === j.id;
-        const isActive = isCurrent && (phase === 'downloading' || phase === 'uploading');
+        const isActive = isCurrent && (phase === 'downloading' || phase === 'splitting' || phase === 'uploading');
         const parts = (j.filester_slug || []).length;
         const partHint = parts > 1 ? ` (${parts} parts)` : parts === 1 ? '' : '';
         const links = (j.filester_slug || []).map(s =>
@@ -356,7 +356,7 @@
         retryDiskBtn.textContent = diskSkipped
           ? `Retry disk-skipped (${diskSkipped})`
           : 'Retry disk-skipped';
-        const active = (st.downloading||0) + (st.uploading||0);
+        const active = (st.downloading||0) + (st.splitting||0) + (st.uploading||0);
         scheduleRefresh(active > 0 ? 5000 : 4000);
       } catch (e) {
         document.getElementById('jobs-list').innerHTML = `<div class="empty">Error: ${esc(e.message)}</div>`;

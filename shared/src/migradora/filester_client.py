@@ -10,6 +10,8 @@ from typing import Any, Callable
 
 import httpx
 
+from migradora.transfer_stats import format_size
+
 logger = logging.getLogger("migradora.filester")
 
 
@@ -759,25 +761,78 @@ class FilesterClient:
             headers["X-Folder-ID"] = folder_id
 
         total_size = file_path.stat().st_size
+        upload_url = f"{self.api_base}/api/v1/upload"
+        logger.info(
+            "upload %s (%s) -> %s",
+            file_path.name,
+            format_size(total_size),
+            upload_url,
+        )
+        last_log_at = 0.0
+        started_at = time.time()
+
+        def report_progress(done: int, total: int) -> None:
+            nonlocal last_log_at
+            now = time.time()
+            if now - last_log_at < 1.0:
+                return
+            last_log_at = now
+            elapsed = now - started_at
+            speed = done / elapsed if elapsed > 0 else 0.0
+            pct = (done / total) * 100 if total else 0.0
+            remaining = ((total - done) / speed) if speed > 0 else 0.0
+            logger.info(
+                "%s: %.1f%%  %s/%s  %s/s  ETA %ds",
+                file_path.name,
+                pct,
+                format_size(done),
+                format_size(total),
+                format_size(speed),
+                int(remaining),
+            )
 
         for attempt in range(self.max_retries + 1):
             try:
                 with open(file_path, "rb") as raw_fh:
                     fh: Any = raw_fh
-                    if on_progress:
+                    if on_progress or total_size > 0:
+                        def progress_hook(done: int, total: int) -> None:
+                            report_progress(done, total)
+                            if on_progress:
+                                on_progress(done, total)
+
                         fh = _ProgressReader(
                             raw_fh,
                             total_size,
-                            on_progress,
+                            progress_hook,
                             chunk_bytes=self._upload_chunk_bytes,
                         )
                     files = {"file": (file_path.name, fh, "application/octet-stream")}
                     resp = self._client.post("/api/v1/upload", files=files, headers=headers)
                 if resp.status_code == 429:
+                    logger.warning(
+                        "Upload attempt %d rate limited for %s",
+                        attempt + 1,
+                        file_path.name,
+                    )
                     time.sleep(self.retry_delay * (2 ** attempt))
                     continue
                 resp.raise_for_status()
-                return resp.json()
+                result = resp.json()
+                slug = result.get("slug")
+                if not slug:
+                    data = result.get("data")
+                    if isinstance(data, dict):
+                        slug = data.get("slug")
+                if slug:
+                    logger.info(
+                        "%s DONE -> https://filester.me/d/%s",
+                        file_path.name,
+                        slug,
+                    )
+                else:
+                    logger.info("%s DONE", file_path.name)
+                return result
             except (httpx.HTTPStatusError, httpx.TimeoutException, httpx.NetworkError) as exc:
                 if attempt < self.max_retries:
                     logger.warning("Upload attempt %d failed: %s", attempt + 1, exc)

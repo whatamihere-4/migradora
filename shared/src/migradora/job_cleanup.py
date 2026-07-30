@@ -13,6 +13,7 @@ logger = logging.getLogger("migradora.job_cleanup")
 
 _KEEP_DIR_STATUSES = frozenset({
     FileStatus.DOWNLOADING,
+    FileStatus.SPLITTING,
     FileStatus.UPLOADING,
     FileStatus.DOWNLOADED,
 })

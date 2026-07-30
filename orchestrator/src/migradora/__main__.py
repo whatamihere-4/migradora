@@ -37,6 +37,7 @@ def cmd_status(settings: Settings) -> int:
             "pending": stats.pending,
             "downloading": stats.downloading,
             "downloaded": stats.downloaded,
+            "splitting": stats.splitting,
             "uploading": stats.uploading,
             "uploaded": stats.uploaded,
             "failed": stats.failed,

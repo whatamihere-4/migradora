@@ -89,7 +89,7 @@ def create_app(settings: Settings, orchestrator: Orchestrator) -> FastAPI:
         current_job_size = 0
         job_id = pipeline.get("current_job_id")
         phase = pipeline.get("phase")
-        if job_id and phase in ("downloading", "uploading"):
+        if job_id and phase in ("downloading", "splitting", "uploading"):
             record = queue.get_file(job_id)
             if record:
                 current_job = _job_payload(record)
@@ -136,6 +136,7 @@ def create_app(settings: Settings, orchestrator: Orchestrator) -> FastAPI:
                 "pending": stats.pending,
                 "downloading": stats.downloading,
                 "downloaded": stats.downloaded,
+                "splitting": stats.splitting,
                 "uploading": stats.uploading,
                 "uploaded": stats.uploaded,
                 "failed": stats.failed,

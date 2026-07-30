@@ -10,6 +10,7 @@ from migradora.transfer_stats import (
     compute_remaining_bytes,
     eta_seconds,
     format_eta,
+    format_size,
     format_speed,
 )
 
@@ -20,6 +21,14 @@ class FormatSpeedTests(unittest.TestCase):
 
     def test_none(self) -> None:
         self.assertEqual(format_speed(None), "—")
+
+
+class FormatSizeTests(unittest.TestCase):
+    def test_gigabytes(self) -> None:
+        self.assertEqual(format_size(14 * 1024**3), "14.00 GB")
+
+    def test_zero(self) -> None:
+        self.assertEqual(format_size(0), "0 B")
 
 
 class FormatEtaTests(unittest.TestCase):

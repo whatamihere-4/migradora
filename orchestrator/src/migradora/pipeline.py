@@ -19,7 +19,7 @@ from migradora.size_limits import (
     oversize_skip_reason,
     required_disk_gb,
 )
-from migradora.transfer_stats import TransferTracker, eta_seconds
+from migradora.transfer_stats import TransferTracker, eta_seconds, format_size
 from migradora.utils import free_disk_gb
 
 from migradora.filester_folders import (
@@ -101,6 +101,9 @@ class PipelineCoordinator:
                 max(0, self._upload_bytes_total - self._upload_bytes_done),
                 speed_bps,
             )
+        elif phase == "splitting":
+            speed_bps = None
+            phase_eta_sec = None
         return {
             "current_job_id": self._current_job_id,
             "current_job_name": self._current_job_name,
@@ -322,15 +325,15 @@ class PipelineCoordinator:
         )
         self._transfer.complete_phase("download", actual_size)
 
-        self._current_phase = "uploading"
+        self._transfer.complete_phase("download", actual_size)
+
         self._progress_bytes = 0
         self._progress_total = actual_size
         self._upload_bytes_done = 0
         self._upload_bytes_total = actual_size
-        self._transfer.begin_phase("upload")
-        self.queue.update_file(job.id, status=FileStatus.UPLOADING)
 
         slugs: list[str] = []
+        upload_phase_started = False
         with FilesterClient(
             self.settings.filester_api_key,
             self.settings.filester_api_base,
@@ -347,34 +350,65 @@ class PipelineCoordinator:
                 self._folder_cache,
             )
             logger.info(
-                "Job %d uploading to Filester folder %s (gofile path %r)",
+                "Job %d split/upload to Filester folder %s (gofile path %r)",
                 job.id,
                 folder_id,
                 _job_upload_folder_path(job) or job.gofile_path,
             )
             was_split = False
             upload_responses: list[dict] = []
-            for part in iter_upload_parts(
-                local_path,
-                job_dir,
-                self.settings.filester_max_file_bytes,
-                base_name=local_path.stem,
-                skip_check=lambda: self._check_skip(job.id),
-                split_mode=self.settings.filester_split_mode,
-                ffmpeg_bin=self.settings.ffmpeg_bin,
-                ffprobe_bin=self.settings.ffprobe_bin,
-                mkvmerge_bin=self.settings.mkvmerge_bin,
-                ffmpeg_timeout=self.settings.ffmpeg_timeout_sec,
-            ):
-                self._check_skip(job.id)
+            parts_iter = iter(
+                iter_upload_parts(
+                    local_path,
+                    job_dir,
+                    self.settings.filester_max_file_bytes,
+                    base_name=local_path.stem,
+                    skip_check=lambda: self._check_skip(job.id),
+                    split_mode=self.settings.filester_split_mode,
+                    ffmpeg_bin=self.settings.ffmpeg_bin,
+                    ffprobe_bin=self.settings.ffprobe_bin,
+                    mkvmerge_bin=self.settings.mkvmerge_bin,
+                    ffmpeg_timeout=self.settings.ffmpeg_timeout_sec,
+                )
+            )
+            while True:
+                self._current_phase = "splitting"
+                self.queue.update_file(job.id, status=FileStatus.SPLITTING)
+                try:
+                    part = next(parts_iter)
+                except StopIteration:
+                    break
+
                 if int(part.get("part_count") or 1) > 1:
                     was_split = True
                 part_path = Path(part["path"])
                 part_size = part["size_bytes"]
+                part_index = int(part.get("part_index") or 1)
+                part_count = int(part.get("part_count") or 1)
                 part_base_done = self._upload_bytes_done
+
+                self._current_phase = "uploading"
+                if not upload_phase_started:
+                    self._transfer.begin_phase("upload")
+                    self.queue.update_file(job.id, status=FileStatus.UPLOADING)
+                    upload_phase_started = True
+
                 self._progress_bytes = 0
                 self._progress_total = part_size
-                logger.info("Uploading %s (%d bytes)", part["filename"], part_size)
+                if part_count > 1:
+                    logger.info(
+                        "Uploading part %d/%d: %s (%s)",
+                        part_index,
+                        part_count,
+                        part["filename"],
+                        format_size(part_size),
+                    )
+                else:
+                    logger.info(
+                        "Uploading %s (%s)",
+                        part["filename"],
+                        format_size(part_size),
+                    )
 
                 def on_upload_progress(done: int, total: int) -> None:
                     self._check_skip(job.id)
@@ -399,7 +433,6 @@ class PipelineCoordinator:
                 slugs.append(slug)
                 self._upload_bytes_done = part_base_done + part_size
                 cleanup_dir(part_path)
-                logger.info("Uploaded -> https://filester.me/d/%s", slug)
                 filester.reset_connections()
 
             if was_split:
@@ -410,7 +443,8 @@ class PipelineCoordinator:
                     upload_responses=upload_responses,
                 )
 
-        self._transfer.complete_phase("upload", self._upload_bytes_total)
+        if upload_phase_started:
+            self._transfer.complete_phase("upload", self._upload_bytes_total)
 
         self._release_job(job.id, str(local_path))
         self.queue.update_file(
