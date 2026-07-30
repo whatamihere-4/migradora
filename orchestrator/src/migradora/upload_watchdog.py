@@ -13,7 +13,7 @@ from typing import Any
 import httpx
 
 from migradora.config import Settings
-from migradora.job_cleanup import cleanup_job_files
+from migradora.job_cleanup import release_job_downloads
 from migradora.models import FileStatus, QueueState
 from migradora.queue.manager import QueueManager
 from migradora.transfer_stats import format_speed
@@ -64,8 +64,9 @@ def _min_bps(settings: Settings) -> float:
 def prepare_job_restart(settings: Settings, job_id: int, reason: str) -> list[str]:
     queue = QueueManager(settings.db_path)
     record = queue.get_file(job_id)
-    removed = cleanup_job_files(
+    removed = release_job_downloads(
         settings,
+        queue,
         job_id,
         record.local_path if record else None,
     )

@@ -9,7 +9,7 @@ from pathlib import Path
 
 from migradora.config import Settings
 from migradora.discovery.api_discovery import discover_and_enqueue
-from migradora.job_cleanup import cleanup_job_files
+from migradora.job_cleanup import cleanup_job_files, release_job_downloads
 from migradora.logger import setup_logging
 from migradora.models import FileStatus, QueueState
 from migradora.monitor.filester_storage import FilesterStorageMonitor
@@ -102,7 +102,13 @@ class Orchestrator:
             self.pipeline.request_skip(job_id)
             return {"status": "skip_requested", "job_id": job_id, "removed": []}
 
-        removed = cleanup_job_files(self.settings, job_id, record.local_path)
+        try:
+            removed = release_job_downloads(
+                self.settings, self.queue, job_id, record.local_path
+            )
+        except OSError as exc:
+            logger.warning("Cleanup for skip job %d failed: %s", job_id, exc)
+            removed = []
         self.queue.mark_skipped(job_id)
         logger.info("Skipped job %d; removed %s", job_id, removed)
         return {"status": "skipped", "job_id": job_id, "removed": removed}

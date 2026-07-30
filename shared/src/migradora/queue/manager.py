@@ -232,6 +232,13 @@ class QueueManager:
                 values,
             )
 
+    def clear_local_path(self, file_id: int) -> None:
+        with self.connection() as conn:
+            conn.execute(
+                "UPDATE files SET local_path=NULL, updated_at=? WHERE id=? AND is_part=0",
+                (utc_now(), file_id),
+            )
+
     def rewind_job(self, job_id: int, *, reason: str = "") -> bool:
         """Return a job to pending and clear its local path (watchdog / manual retry)."""
         with self.connection() as conn:

@@ -27,7 +27,7 @@ from migradora.filester_folders import (
     ensure_filester_folder_path,
     organize_split_parts_into_folder,
 )
-from migradora.job_cleanup import cleanup_job_files
+from migradora.job_cleanup import cleanup_job_files, purge_stale_job_dirs, release_job_downloads
 
 logger = logging.getLogger("migradora.pipeline")
 
@@ -125,10 +125,15 @@ class PipelineCoordinator:
         if self._skip_job_id == job_id:
             raise JobSkipped(job_id)
 
+    def _release_job(self, job_id: int, local_path: str | None = None) -> None:
+        removed = release_job_downloads(self.settings, self.queue, job_id, local_path)
+        if removed:
+            logger.info("Released disk for job %d: %s", job_id, removed)
+
     def _finish_skip(self, job_id: int) -> None:
         record = self.queue.get_file(job_id)
         local_path = record.local_path if record else None
-        cleanup_job_files(self.settings, job_id, local_path)
+        self._release_job(job_id, local_path)
         self.queue.mark_skipped(job_id)
         self._skip_job_id = None
         self._current_phase = "idle"
@@ -141,7 +146,7 @@ class PipelineCoordinator:
         logger.info("Job %d skipped; local files removed", job_id)
 
     def _skip_job_for_disk(self, job, reason: str) -> None:
-        cleanup_job_files(self.settings, job.id, job.local_path)
+        self._release_job(job.id, job.local_path)
         self.queue.mark_skipped(job.id, reason)
         self._current_phase = "idle"
         self._current_job_id = None
@@ -201,8 +206,18 @@ class PipelineCoordinator:
                 self._finish_skip(exc.job_id)
             except Exception as exc:
                 logger.error("Pipeline failed for job %d: %s", job.id, exc)
+                record = self.queue.get_file(job.id)
+                self._release_job(
+                    job.id,
+                    record.local_path if record else None,
+                )
+                self._current_phase = "idle"
+                self._current_job_id = None
+                self._current_job_name = ""
                 self._progress_bytes = 0
                 self._progress_total = 0
+                self._upload_bytes_done = 0
+                self._upload_bytes_total = 0
                 if job.attempts >= self.settings.download_max_retries:
                     self.queue.mark_failed(job.id, str(exc), retry=False)
                 else:
@@ -219,9 +234,14 @@ class PipelineCoordinator:
         job_dir = Path(self.settings.download_dir) / f"job-{job.id}"
         job_dir.mkdir(parents=True, exist_ok=True)
 
+        purged = purge_stale_job_dirs(self.settings, self.queue, keep_job_id=job.id)
+        if purged:
+            logger.info("Purged %d stale job dir(s) before job %d", len(purged), job.id)
+
         skip_reason = oversize_skip_reason(job.size_bytes, self.settings)
         if skip_reason:
             logger.warning("Auto-skipping job %d (%s): %s", job.id, job.filename, skip_reason)
+            self._release_job(job.id, None)
             self.queue.mark_skipped(job.id, skip_reason)
             self._current_phase = "idle"
             self._current_job_id = None
@@ -238,6 +258,7 @@ class PipelineCoordinator:
                 if self.settings.disk_pause_skip_job:
                     self._skip_job_for_disk(job, reason)
                     return
+                self._release_job(job.id, job.local_path)
                 self.queue.update_file(job.id, status=FileStatus.PENDING)
                 self.queue.set_queue_state(QueueState.PAUSED_DISK, reason)
                 self._current_phase = "idle"
@@ -391,12 +412,11 @@ class PipelineCoordinator:
 
         self._transfer.complete_phase("upload", self._upload_bytes_total)
 
-        cleanup_dir(job_dir)
+        self._release_job(job.id, str(local_path))
         self.queue.update_file(
             job.id,
             status=FileStatus.UPLOADED,
             filester_slug=slugs,
-            local_path=None,
         )
         self._current_phase = "idle"
         self._current_job_id = None

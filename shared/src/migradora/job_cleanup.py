@@ -2,14 +2,24 @@
 
 from __future__ import annotations
 
+import logging
 import shutil
 from pathlib import Path
 
-from migradora.config import Settings
+from migradora.models import FileStatus
+from migradora.queue.manager import QueueManager
+
+logger = logging.getLogger("migradora.job_cleanup")
+
+_KEEP_DIR_STATUSES = frozenset({
+    FileStatus.DOWNLOADING,
+    FileStatus.UPLOADING,
+    FileStatus.DOWNLOADED,
+})
 
 
 def cleanup_job_files(
-    settings: Settings,
+    settings,
     job_id: int,
     local_path: str | None = None,
 ) -> list[str]:
@@ -28,6 +38,63 @@ def cleanup_job_files(
             else:
                 shutil.rmtree(path, ignore_errors=True)
             removed.append(str(path))
+
+    return removed
+
+
+def release_job_downloads(
+    settings,
+    queue: QueueManager,
+    job_id: int,
+    local_path: str | None = None,
+) -> list[str]:
+    """Delete on-disk job data and clear ``local_path`` in the queue."""
+    removed = cleanup_job_files(settings, job_id, local_path)
+    queue.clear_local_path(job_id)
+    return removed
+
+
+def purge_stale_job_dirs(
+    settings,
+    queue: QueueManager,
+    *,
+    keep_job_id: int | None = None,
+) -> list[str]:
+    """Remove ``job-*`` dirs for jobs that are not actively transferring.
+
+    Called when starting a new job so failed/skipped/completed leftovers do not
+    fill the disk. The job currently being processed (``keep_job_id``) is never
+    removed; dirs for jobs in downloading/uploading/downloaded states are kept.
+    """
+    removed: list[str] = []
+    base = Path(settings.download_dir)
+    if not base.is_dir():
+        return removed
+
+    for path in sorted(base.iterdir()):
+        if not path.is_dir() or not path.name.startswith("job-"):
+            continue
+        suffix = path.name.removeprefix("job-")
+        try:
+            job_id = int(suffix)
+        except ValueError:
+            continue
+        if keep_job_id is not None and job_id == keep_job_id:
+            continue
+
+        record = queue.get_file(job_id)
+        if record and record.status in _KEEP_DIR_STATUSES:
+            continue
+
+        shutil.rmtree(path, ignore_errors=True)
+        removed.append(str(path))
+        if record and record.local_path:
+            queue.clear_local_path(job_id)
+        logger.info(
+            "Purged stale download dir for job %d (status=%s)",
+            job_id,
+            record.status.value if record else "unknown",
+        )
 
     return removed
 
