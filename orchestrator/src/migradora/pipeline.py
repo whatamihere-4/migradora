@@ -78,6 +78,15 @@ class PipelineCoordinator:
         self._transfer = TransferTracker()
         self._job_logs = JobLogStore()
         self._upload_reporter: UploadProgressReporter | None = None
+        self._activity_text: str = ""
+        self._last_activity_at: float = 0.0
+
+    def _set_activity(self, text: str, *, force: bool = False) -> None:
+        now = time.time()
+        if not force and now - self._last_activity_at < 1.0:
+            return
+        self._last_activity_at = now
+        self._activity_text = text.strip()
 
     def _append_job_log(self, job_id: int, line: str) -> None:
         self._job_logs.append(job_id, line)
@@ -129,7 +138,11 @@ class PipelineCoordinator:
             "job_logs": self._job_logs.get(self._current_job_id or 0, tail=22)
             if self._current_job_id
             else [],
-            "status_text": self._upload_reporter.status_text if self._upload_reporter else "",
+            "status_text": (
+                self._upload_reporter.status_text
+                if self._upload_reporter
+                else self._activity_text
+            ),
             "upload_progress": self._upload_reporter.snapshot()
             if self._upload_reporter
             else None,
@@ -164,6 +177,7 @@ class PipelineCoordinator:
         self._upload_bytes_done = 0
         self._upload_bytes_total = 0
         self._upload_reporter = None
+        self._activity_text = ""
         logger.info("Job %d skipped; local files removed", job_id)
 
     def _skip_job_for_disk(self, job, reason: str) -> None:
@@ -240,6 +254,7 @@ class PipelineCoordinator:
                 self._upload_bytes_done = 0
                 self._upload_bytes_total = 0
                 self._upload_reporter = None
+                self._activity_text = ""
                 if job.attempts >= self.settings.download_max_retries:
                     self.queue.mark_failed(job.id, str(exc), retry=False)
                 else:
@@ -300,6 +315,8 @@ class PipelineCoordinator:
         self._upload_bytes_done = 0
         self._upload_bytes_total = 0
         self._last_touch_at = 0.0
+        self._last_activity_at = 0.0
+        self._activity_text = f"Downloading {job.filename}…"
         self._transfer.begin_phase("download")
         self.queue.update_file(job.id, status=FileStatus.DOWNLOADING)
 
@@ -310,6 +327,18 @@ class PipelineCoordinator:
                 self._progress_total = total
             self._transfer.update_progress("download", done)
             self._touch_job_progress(job.id)
+            total_bytes = total or self._progress_total or done
+            speed = self._transfer.download_bps
+            pct = (done / total_bytes * 100.0) if total_bytes > 0 else 0.0
+            eta = eta_seconds(max(0, total_bytes - done), speed)
+            status = (
+                f"Downloading: {pct:.1f}% — {format_size(done)}/{format_size(total_bytes)}"
+            )
+            if speed:
+                status += f" @ {format_size(speed)}/s"
+            if eta is not None and eta > 0:
+                status += f" — ETA {int(eta)}s"
+            self._set_activity(status)
 
         with GofileClient(
             token=self.settings.gofile_token,
@@ -554,5 +583,6 @@ class PipelineCoordinator:
         self._upload_bytes_done = 0
         self._upload_bytes_total = 0
         self._upload_reporter = None
+        self._activity_text = ""
         job_log(f"Job complete: {job.filename}")
         logger.info("Job %d complete: %s", job.id, job.filename)

@@ -77,7 +77,7 @@
     .meta { font-size: 0.82rem; color: var(--muted); line-height: 1.5; }
     .meta strong { color: var(--text); font-weight: 600; }
     .progress-wrap { width: 100%; height: 6px; background: var(--bg); border-radius: 3px; overflow: hidden; margin-top: 0.5rem; }
-    .progress-bar { height: 100%; background: var(--accent); border-radius: 3px; transition: width 0.4s ease; width: 0%; }
+    .progress-bar { height: 100%; background: var(--accent); border-radius: 3px; transition: width 0.15s ease; width: 0%; }
     .progress-bar.indeterminate { width: 30%; animation: indeterminate 1.5s ease-in-out infinite; }
     @keyframes indeterminate {
       0% { margin-left: 0%; width: 30%; }
@@ -207,8 +207,14 @@
 
   <script>
     const FILTERS = ['all', 'pending', 'downloading', 'uploading', 'uploaded', 'failed', 'skipped'];
+    const STATUS_REFRESH_MS = 1000;
+    const JOBS_REFRESH_MS = 10000;
+    const JOBS_LIMIT = 150;
     let activeFilter = 'all';
     let refreshTimer = null;
+    let cachedJobs = [];
+    let lastJobsFetchAt = 0;
+    let refreshInFlight = false;
     const LOG_SCROLL_EPS = 8;
 
     function logIsPinnedToBottom(logEl) {
@@ -396,13 +402,41 @@
       refreshTimer = setTimeout(refresh, ms);
     }
 
+    async function fetchJobs(force) {
+      const now = Date.now();
+      if (!force && cachedJobs.length && (now - lastJobsFetchAt) < JOBS_REFRESH_MS) {
+        return cachedJobs;
+      }
+      const jobsResp = await api(`/jobs?limit=${JOBS_LIMIT}`);
+      cachedJobs = jobsResp.jobs || [];
+      lastJobsFetchAt = now;
+      return cachedJobs;
+    }
+
+    function mergeCurrentJob(jobs, currentJob) {
+      if (!currentJob) return jobs;
+      const cur = jobs.find(j => j.id === currentJob.id);
+      if (cur) {
+        if (currentJob.job_logs) cur.job_logs = currentJob.job_logs;
+        cur.status_text = currentJob.status_text || cur.status_text;
+        cur.upload_progress = currentJob.upload_progress || cur.upload_progress;
+        if (currentJob.status) cur.status = currentJob.status;
+        return jobs;
+      }
+      return [currentJob, ...jobs];
+    }
+
+    function isActivePipeline(p) {
+      return p && (p.phase === 'downloading' || p.phase === 'splitting' || p.phase === 'uploading');
+    }
+
     function renderFilters() {
       const el = document.getElementById('filters');
       el.innerHTML = FILTERS.map(f =>
         `<button class="${f === activeFilter ? 'active' : ''}" data-f="${f}">${f}</button>`
       ).join('');
       el.querySelectorAll('button').forEach(btn => {
-        btn.onclick = () => { activeFilter = btn.dataset.f; renderFilters(); refresh(); };
+        btn.onclick = () => { activeFilter = btn.dataset.f; renderFilters(); fetchJobs(true).then(refresh); };
       });
     }
 
@@ -466,7 +500,9 @@
         const isCurrent = currentId === j.id;
         const isActive = isCurrent && (phase === 'downloading' || phase === 'splitting' || phase === 'uploading');
         const uploadProgress = isCurrent ? (pipeline.upload_progress || j.upload_progress) : j.upload_progress;
-        const statusText = isCurrent ? (pipeline.status_text || j.status_text || '') : (j.status_text || '');
+        const statusText = isCurrent
+          ? (pipeline.status_text || j.status_text || '')
+          : (j.status_text || '');
         const parts = (j.filester_slug || []).length;
         const partHint = parts > 1 ? ` (${parts} parts)` : parts === 1 ? '' : '';
         const links = (j.filester_slug || []).map(s =>
@@ -532,11 +568,17 @@
     }
 
     async function refresh() {
+      if (refreshInFlight) {
+        scheduleRefresh(STATUS_REFRESH_MS);
+        return;
+      }
+      refreshInFlight = true;
+      let active = false;
       try {
-        const [status, jobsResp] = await Promise.all([
-          api('/status'),
-          api('/jobs?limit=500'),
-        ]);
+        const status = await api('/status');
+        const p = status.pipeline || {};
+        active = isActivePipeline(p);
+        const jobs = mergeCurrentJob(await fetchJobs(!active), status.current_job);
         const st = status.stats || {};
         const eta = status.eta || {};
         renderStats(st, eta);
@@ -546,7 +588,6 @@
         pill.className = 'pill ' + (qs === 'running' ? 'running' : qs.includes('paused') ? 'paused' : 'failed');
         document.getElementById('queue-meta').innerHTML = status.pause_reason
           ? `<strong>Paused:</strong> ${esc(status.pause_reason)}` : '';
-        const p = status.pipeline || {};
         const phaseLabel = p.phase && p.phase !== 'idle'
           ? `<strong>${esc(p.phase)}</strong>${p.current_job_name ? ' — ' + esc(p.current_job_name) : ''} (job #${p.current_job_id || '?'})`
           : 'Idle — waiting for work';
@@ -570,21 +611,6 @@
           : '';
         document.getElementById('pipeline-meta').innerHTML =
           phaseLabel + progLabel + speedLabel + etaLabel + queueEtaLabel + avgSpeedLabel;
-        const jobs = jobsResp.jobs || [];
-        if (status.current_job && status.current_job.job_logs && status.current_job.job_logs.length) {
-          const cur = jobs.find(j => j.id === status.current_job.id);
-          if (cur) {
-            cur.job_logs = status.current_job.job_logs;
-            cur.status_text = status.current_job.status_text || cur.status_text;
-            cur.upload_progress = status.current_job.upload_progress || cur.upload_progress;
-          } else jobs.unshift(status.current_job);
-        } else if (status.current_job) {
-          const cur = jobs.find(j => j.id === status.current_job.id);
-          if (cur) {
-            cur.status_text = status.current_job.status_text || cur.status_text;
-            cur.upload_progress = status.current_job.upload_progress || cur.upload_progress;
-          }
-        }
         renderJobs(jobs, p, status.current_job, eta);
         const diskSkipped = st.disk_skipped || 0;
         const retryDiskBtn = document.getElementById('btn-retry-disk');
@@ -592,11 +618,15 @@
         retryDiskBtn.textContent = diskSkipped
           ? `Retry disk-skipped (${diskSkipped})`
           : 'Retry disk-skipped';
-        const active = (st.downloading||0) + (st.splitting||0) + (st.uploading||0);
-        scheduleRefresh(active > 0 ? 2000 : 4000);
+        if (!active) {
+          active = (st.downloading||0) + (st.splitting||0) + (st.uploading||0) > 0;
+        }
+        scheduleRefresh(active ? STATUS_REFRESH_MS : 4000);
       } catch (e) {
         document.getElementById('jobs-list').innerHTML = `<div class="empty">Error: ${esc(e.message)}</div>`;
         scheduleRefresh(5000);
+      } finally {
+        refreshInFlight = false;
       }
     }
 

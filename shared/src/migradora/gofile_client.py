@@ -408,9 +408,11 @@ class GofileClient:
 
         progress_bytes = 0
         progress_lock = threading.Lock()
+        range_done = [0] * len(ranges)
 
-        def fetch_range(span: tuple[int, int]) -> Path:
+        def fetch_range(span: tuple[int, int], range_index: int) -> Path:
             start, end = span
+            span_bytes = end - start + 1
             temp = part.with_suffix(f"{part.suffix}.{start}")
             headers = {"Range": f"bytes={start}-{end}"}
             with self._client.stream(
@@ -421,19 +423,26 @@ class GofileClient:
                 with temp.open("wb") as fh:
                     for chunk in resp.iter_bytes(chunk_size=1024 * 1024):
                         fh.write(chunk)
+                        if on_progress:
+                            with progress_lock:
+                                range_done[range_index] += len(chunk)
+                                on_progress(sum(range_done), total_size)
+            if on_progress and range_done[range_index] < span_bytes:
+                with progress_lock:
+                    range_done[range_index] = span_bytes
+                    on_progress(sum(range_done), total_size)
             return temp
 
         temps: list[tuple[int, Path]] = []
         with ThreadPoolExecutor(max_workers=len(ranges)) as pool:
-            futures = {pool.submit(fetch_range, span): span for span in ranges}
+            futures = {
+                pool.submit(fetch_range, span, index): span
+                for index, span in enumerate(ranges)
+            }
             for future in as_completed(futures):
                 start, _ = futures[future]
                 temp = future.result()
                 temps.append((start, temp))
-                if on_progress:
-                    with progress_lock:
-                        progress_bytes += temp.stat().st_size
-                        on_progress(progress_bytes, total_size)
 
         with part.open("wb") as out:
             for _, temp in sorted(temps, key=lambda item: item[0]):
