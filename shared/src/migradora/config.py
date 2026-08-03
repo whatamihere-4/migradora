@@ -113,6 +113,10 @@ class Settings:
     dashboard_host: str = "0.0.0.0"
     log_level: str = "INFO"
 
+    # StashDB (split-folder title + thumbnail)
+    stashdb_api_key: str = ""
+    stashdb_graphql_url: str = "https://stashdb.org/graphql"
+
     # Worker
     worker_poll_interval_sec: float = 5.0
     heartbeat_interval_sec: int = 30
@@ -188,6 +192,10 @@ class Settings:
             webui_port=_webui_port(),
             dashboard_host=_env("DASHBOARD_HOST", "0.0.0.0"),
             log_level=_env("LOG_LEVEL", "INFO"),
+            stashdb_api_key=_env("STASHDB_API_KEY"),
+            stashdb_graphql_url=_env(
+                "STASHDB_GRAPHQL_URL", "https://stashdb.org/graphql"
+            ),
             worker_poll_interval_sec=float(_env("WORKER_POLL_INTERVAL_SEC", "5")),
             heartbeat_interval_sec=_env_int("HEARTBEAT_INTERVAL_SEC", 30),
         )

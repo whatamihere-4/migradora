@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import logging
+import mimetypes
 import time
 from dataclasses import dataclass
 from pathlib import Path
@@ -839,6 +840,42 @@ class FilesterClient:
                     continue
                 raise
         raise RuntimeError(f"Upload failed after retries: {file_path}")
+
+    def upload_folder_thumbnail(
+        self,
+        folder_identifier: str,
+        image_path: str | Path,
+    ) -> dict[str, Any]:
+        """Set a folder thumbnail via POST /api/v1/folder/thumbnail."""
+        path = Path(image_path)
+        if not path.is_file():
+            raise FileNotFoundError(str(path))
+        size = path.stat().st_size
+        if size > 5 * 1024 * 1024:
+            raise ValueError(f"Thumbnail too large ({size} bytes; max 5 MB)")
+
+        content_type = mimetypes.guess_type(path.name)[0] or "application/octet-stream"
+        folder_id = (folder_identifier or "").strip()
+        if not folder_id:
+            raise ValueError("folder identifier is required")
+
+        with path.open("rb") as fh:
+            files = {
+                "thumbnail": (path.name, fh, content_type),
+            }
+            data = {"folder": folder_id}
+            resp = self._client.post("/api/v1/folder/thumbnail", files=files, data=data)
+        if resp.status_code == 429:
+            raise httpx.HTTPStatusError(
+                "rate limited",
+                request=resp.request,
+                response=resp,
+            )
+        resp.raise_for_status()
+        if resp.content:
+            result = resp.json()
+            return result if isinstance(result, dict) else {}
+        return {}
 
     def verify_upload(self, slug: str, expected_size: int) -> bool:
         try:

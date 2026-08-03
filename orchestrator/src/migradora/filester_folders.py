@@ -5,6 +5,7 @@ from __future__ import annotations
 import logging
 import re
 from dataclasses import dataclass
+from pathlib import Path
 
 from migradora.config import Settings
 from migradora.filester_client import FilesterClient
@@ -74,11 +75,16 @@ def organize_split_parts_into_folder(
     parent_folder_id: str,
     folder_name: str,
     upload_responses: list[dict],
+    folder_title: str | None = None,
+    cover_image_path: Path | None = None,
 ) -> str:
     """Create a video-named subfolder and move uploaded split parts into it.
 
     Parts are uploaded flat into the studio folder first (Filester API pattern),
     then bulk-moved into the subfolder once all parts finish uploading.
+
+    ``folder_title`` overrides ``folder_name`` for the subfolder when set (e.g.
+    StashDB scene title). ``cover_image_path`` uploads a folder thumbnail after move.
     """
     parent = (parent_folder_id or "").strip()
     if not parent:
@@ -93,7 +99,8 @@ def organize_split_parts_into_folder(
         logger.warning("Split folder organize skipped: no file ids in upload responses")
         return parent
 
-    dest_folder_id = ensure_split_parts_folder(client, parent, folder_name)
+    display_name = (folder_title or folder_name or "").strip() or folder_name
+    dest_folder_id = ensure_split_parts_folder(client, parent, display_name)
     try:
         move_data = client.move_files(file_ids, dest_folder_id)
     except Exception as exc:
@@ -118,13 +125,26 @@ def organize_split_parts_into_folder(
         )
         return parent
 
-    title = sanitize_folder_name(folder_name)
+    title = sanitize_folder_name(display_name)
     logger.info(
         'Moved %d split part(s) into subfolder %r -> %s',
         moved,
         title,
         dest_folder_id,
     )
+
+    if cover_image_path and cover_image_path.is_file():
+        try:
+            client.upload_folder_thumbnail(dest_folder_id, cover_image_path)
+            logger.info("Folder thumbnail set for %s (%s)", title, dest_folder_id)
+        except Exception as exc:
+            logger.warning(
+                "Folder thumbnail upload failed for %s (%s): %s",
+                title,
+                dest_folder_id,
+                exc,
+            )
+
     return dest_folder_id
 
 

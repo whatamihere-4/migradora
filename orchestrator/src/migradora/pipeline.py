@@ -21,6 +21,7 @@ from migradora.size_limits import (
     oversize_skip_reason,
     required_disk_gb,
 )
+from migradora.stashdb_client import StashdbClient, resolve_stashdb_metadata
 from migradora.transfer_stats import TransferTracker, eta_seconds, format_size
 from migradora.upload_progress import UploadProgressReporter
 from migradora.upload_resume import (
@@ -238,10 +239,17 @@ class PipelineCoordinator:
         upload_phase_started: bool,
     ) -> None:
         if was_split:
+            cover_path: Path | None = None
+            if resume_state.stashdb_cover_path:
+                candidate = Path(resume_state.stashdb_cover_path)
+                if candidate.is_file():
+                    cover_path = candidate
             organize_split_parts_into_folder(
                 filester,
                 parent_folder_id=folder_id,
                 folder_name=job.filename,
+                folder_title=resume_state.stashdb_title,
+                cover_image_path=cover_path,
                 upload_responses=upload_responses,
             )
         if upload_phase_started:
@@ -471,6 +479,25 @@ class PipelineCoordinator:
             resume_state.oshash = oshash
             resume_state.source_path = str(local_path)
             save_upload_resume_state(job_dir, resume_state)
+
+        stashdb_client = StashdbClient(
+            self.settings.stashdb_api_key,
+            self.settings.stashdb_graphql_url,
+        )
+        scene_id, stash_title, cover_path = resolve_stashdb_metadata(
+            stashdb_client,
+            oshash,
+            job_dir,
+            existing_scene_id=resume_state.stashdb_scene_id,
+            existing_title=resume_state.stashdb_title,
+            existing_cover_path=resume_state.stashdb_cover_path,
+        )
+        if stash_title:
+            resume_state.stashdb_scene_id = scene_id
+            resume_state.stashdb_title = stash_title
+            resume_state.stashdb_cover_path = cover_path
+            save_upload_resume_state(job_dir, resume_state)
+            self._append_job_log(job.id, f"StashDB: {stash_title}")
 
         self._progress_bytes = 0
         self._progress_total = actual_size

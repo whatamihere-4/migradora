@@ -27,6 +27,9 @@ class UploadResumeStateTests(unittest.TestCase):
             source_path="/data/movie.mp4",
             was_split=True,
             total_parts=3,
+            stashdb_scene_id="scene-uuid",
+            stashdb_title="StashDB Scene Title",
+            stashdb_cover_path="/data/job-1/.stashdb-cover.webp",
             parts=[
                 UploadedPart(
                     part_index=1,
@@ -42,6 +45,8 @@ class UploadResumeStateTests(unittest.TestCase):
         assert loaded is not None
         self.assertEqual(loaded.oshash, "abc")
         self.assertEqual(loaded.total_parts, 3)
+        self.assertEqual(loaded.stashdb_title, "StashDB Scene Title")
+        self.assertEqual(loaded.stashdb_scene_id, "scene-uuid")
         self.assertEqual(loaded.skip_part_indices(), frozenset({1}))
         self.assertFalse(loaded.upload_complete())
 

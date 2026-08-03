@@ -2,7 +2,9 @@
 
 from __future__ import annotations
 
+import tempfile
 import unittest
+from pathlib import Path
 from unittest.mock import MagicMock
 
 from migradora.filester_client import FilesterFolder
@@ -77,6 +79,42 @@ class OrganizeSplitPartsTests(unittest.TestCase):
         )
         self.assertEqual(dest, "studio-id")
         client.move_files.assert_not_called()
+
+    def test_uses_stashdb_title_and_uploads_thumbnail(self) -> None:
+        client = MagicMock()
+        client.file_identifier_from_response.side_effect = ["slug1"]
+        client.create_folder.return_value = FilesterFolder(
+            identifier="split-folder",
+            name="StashDB Title",
+            parent_identifier="studio-id",
+        )
+        client.folder_is_under_parent.return_value = True
+        client.move_files.return_value = {"moved": 1, "failed": 0}
+
+        with tempfile.NamedTemporaryFile(suffix=".jpg", delete=False) as tmp:
+            tmp.write(b"cover")
+            cover_path = Path(tmp.name)
+
+        try:
+            dest = organize_split_parts_into_folder(
+                client,
+                parent_folder_id="studio-id",
+                folder_name="movie.mp4",
+                folder_title="StashDB Title",
+                cover_image_path=cover_path,
+                upload_responses=[{"slug": "slug1"}],
+            )
+            self.assertEqual(dest, "split-folder")
+            client.create_folder.assert_called_once_with(
+                "StashDB Title",
+                parent_identifier="studio-id",
+            )
+            client.upload_folder_thumbnail.assert_called_once_with(
+                "split-folder",
+                cover_path,
+            )
+        finally:
+            cover_path.unlink(missing_ok=True)
 
 
 if __name__ == "__main__":

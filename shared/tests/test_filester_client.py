@@ -218,5 +218,37 @@ class CreateFolderConflictTests(unittest.TestCase):
         )
 
 
+class UploadFolderThumbnailTests(unittest.TestCase):
+    def setUp(self) -> None:
+        self.client = FilesterClient("test-key")
+
+    def tearDown(self) -> None:
+        self.client.close()
+
+    def test_upload_folder_thumbnail_posts_multipart(self) -> None:
+        import tempfile
+        from pathlib import Path
+
+        with tempfile.NamedTemporaryFile(suffix=".jpg", delete=False) as tmp:
+            tmp.write(b"jpegdata")
+            path = Path(tmp.name)
+        try:
+            mock_resp = MagicMock()
+            mock_resp.status_code = 200
+            mock_resp.content = b'{"success": true}'
+            mock_resp.json.return_value = {"success": True}
+            with patch.object(self.client._client, "post", return_value=mock_resp) as post:
+                result = self.client.upload_folder_thumbnail("folder-id", path)
+            self.assertTrue(result.get("success"))
+            post.assert_called_once()
+            call_kwargs = post.call_args
+            self.assertEqual(call_kwargs[0][0], "/api/v1/folder/thumbnail")
+            self.assertIn("files", call_kwargs[1])
+            self.assertIn("data", call_kwargs[1])
+            self.assertEqual(call_kwargs[1]["data"]["folder"], "folder-id")
+        finally:
+            path.unlink(missing_ok=True)
+
+
 if __name__ == "__main__":
     unittest.main()

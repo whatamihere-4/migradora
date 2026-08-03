@@ -48,6 +48,9 @@ class UploadResumeState:
     was_split: bool = False
     total_parts: int | None = None
     parts: list[UploadedPart] = field(default_factory=list)
+    stashdb_scene_id: str | None = None
+    stashdb_title: str | None = None
+    stashdb_cover_path: str | None = None
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -56,6 +59,9 @@ class UploadResumeState:
             "was_split": self.was_split,
             "total_parts": self.total_parts,
             "parts": [p.to_dict() for p in self.parts],
+            "stashdb_scene_id": self.stashdb_scene_id,
+            "stashdb_title": self.stashdb_title,
+            "stashdb_cover_path": self.stashdb_cover_path,
         }
 
     @classmethod
@@ -68,6 +74,9 @@ class UploadResumeState:
             was_split=bool(data.get("was_split")),
             total_parts=int(total) if total is not None else None,
             parts=parts,
+            stashdb_scene_id=data.get("stashdb_scene_id"),
+            stashdb_title=data.get("stashdb_title"),
+            stashdb_cover_path=data.get("stashdb_cover_path"),
         )
 
     def skip_part_indices(self) -> frozenset[int]:
@@ -109,3 +118,5 @@ def save_upload_resume_state(job_dir: Path, state: UploadResumeState) -> None:
 def delete_upload_resume_state(job_dir: Path) -> None:
     path = state_path(job_dir)
     path.unlink(missing_ok=True)
+    for cover in job_dir.glob(".stashdb-cover.*"):
+        cover.unlink(missing_ok=True)
