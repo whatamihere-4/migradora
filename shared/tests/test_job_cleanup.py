@@ -83,6 +83,22 @@ class JobCleanupTests(unittest.TestCase):
         self.assertFalse(job_dir.exists())
         self.assertEqual(removed, [str(job_dir)])
 
+    def test_purge_keeps_pending_job_with_local_path(self) -> None:
+        job_id = self._enqueue("resume.mp4")
+        job_dir = self.download_dir / f"job-{job_id}"
+        job_dir.mkdir()
+        (job_dir / "resume.mp4").write_bytes(b"data")
+        self.queue.update_file(
+            job_id,
+            status=FileStatus.PENDING,
+            local_path=str(job_dir / "resume.mp4"),
+        )
+
+        removed = purge_stale_job_dirs(self.settings, self.queue)
+
+        self.assertTrue(job_dir.exists())
+        self.assertEqual(removed, [])
+
     def test_cleanup_job_files_only(self) -> None:
         job_id = self._enqueue("only.mp4")
         job_dir = self.download_dir / f"job-{job_id}"

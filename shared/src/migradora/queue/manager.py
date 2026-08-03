@@ -55,7 +55,7 @@ class QueueManager:
                 if force and existing["status"] == FileStatus.UPLOADED.value:
                     conn.execute(
                         """UPDATE files SET status=?, attempts=0, last_error=NULL,
-                           local_path=NULL, filester_slug='[]', updated_at=?
+                           local_path=NULL, filester_slug='[]', oshash=NULL, updated_at=?
                            WHERE id=?""",
                         (FileStatus.PENDING.value, now, existing["id"]),
                     )
@@ -193,6 +193,7 @@ class QueueManager:
         status: FileStatus | None = None,
         local_path: str | None = None,
         sha256: str | None = None,
+        oshash: str | None = None,
         filester_slug: list[str] | None = None,
         last_error: str | None = None,
         download_link: str | None = None,
@@ -210,6 +211,9 @@ class QueueManager:
         if sha256 is not None:
             fields.append("sha256 = ?")
             values.append(sha256)
+        if oshash is not None:
+            fields.append("oshash = ?")
+            values.append(oshash)
         if filester_slug is not None:
             fields.append("filester_slug = ?")
             values.append(json.dumps(filester_slug))
@@ -238,6 +242,21 @@ class QueueManager:
                 "UPDATE files SET local_path=NULL, updated_at=? WHERE id=? AND is_part=0",
                 (utc_now(), file_id),
             )
+
+    def rewind_job_for_upload_resume(self, job_id: int, *, reason: str = "") -> bool:
+        """Return a job to pending for upload resume; keeps local files and slugs."""
+        with self.connection() as conn:
+            cur = conn.execute(
+                """UPDATE files SET status=?, last_error=?, updated_at=?
+                   WHERE id=? AND is_part=0""",
+                (
+                    FileStatus.PENDING.value,
+                    reason or None,
+                    utc_now(),
+                    job_id,
+                ),
+            )
+            return cur.rowcount > 0
 
     def rewind_job(self, job_id: int, *, reason: str = "") -> bool:
         """Return a job to pending and clear its local path (watchdog / manual retry)."""

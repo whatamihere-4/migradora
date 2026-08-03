@@ -16,8 +16,7 @@ from typing import Any
 import httpx
 
 from migradora.config import Settings
-from migradora.job_cleanup import release_job_downloads
-from migradora.models import FileStatus, QueueState
+from migradora.models import QueueState
 from migradora.queue.manager import QueueManager
 from migradora.transfer_stats import format_speed
 
@@ -65,17 +64,16 @@ def _min_bps(settings: Settings) -> float:
 
 
 def prepare_job_restart(settings: Settings, job_id: int, reason: str) -> list[str]:
+    """Prepare upload resume: keep local files and partial upload progress."""
     queue = QueueManager(settings.db_path)
-    record = queue.get_file(job_id)
-    removed = release_job_downloads(
-        settings,
-        queue,
-        job_id,
-        record.local_path if record else None,
-    )
-    queue.rewind_job(job_id, reason=reason)
+    queue.rewind_job_for_upload_resume(job_id, reason=reason)
     queue.set_queue_state(QueueState.RUNNING, "")
-    return removed
+    logger.warning(
+        "Upload watchdog resuming job %s (local files preserved): %s",
+        job_id,
+        reason,
+    )
+    return []
 
 
 def run_watchdog_once(
@@ -182,15 +180,9 @@ def run_watchdog_once(
         return result
 
     if job_id:
-        removed = prepare_job_restart(settings, int(job_id), reason)
+        prepare_job_restart(settings, int(job_id), reason)
         result["job_id"] = job_id
-        result["removed_paths"] = removed
-        logger.warning(
-            "Upload watchdog restarting job %s: %s (removed %s)",
-            job_id,
-            reason,
-            removed,
-        )
+        logger.warning("Upload watchdog restarting job %s: %s", job_id, reason)
     else:
         logger.warning("Upload watchdog triggered without current job id: %s", reason)
 
@@ -261,9 +253,7 @@ def run_watchdog_args(args: argparse.Namespace, settings: Settings) -> int:
             )
         elif action == "restart":
             print(f"Upload watchdog triggered: {result.get('reason')}")
-            if result.get("removed_paths"):
-                print(f"  Cleaned: {result['removed_paths']}")
-            print("  Host should restart the orchestrator container.")
+            print("  Local download files preserved; orchestrator will resume upload.")
         elif action == "status_unreachable":
             print("Upload watchdog: could not reach /status", file=sys.stderr)
             return EXIT_ERROR

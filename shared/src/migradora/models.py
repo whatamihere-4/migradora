@@ -38,6 +38,7 @@ class FileRecord:
     gofile_url: str | None
     jd2_package_name: str | None
     sha256: str | None
+    oshash: str | None
     status: FileStatus
     local_path: str | None
     filester_slug: list[str]
@@ -67,6 +68,7 @@ class FileRecord:
             gofile_url=row["gofile_url"] if "gofile_url" in row.keys() else None,
             jd2_package_name=row["jd2_package_name"] if "jd2_package_name" in row.keys() else None,
             sha256=row["sha256"],
+            oshash=row["oshash"] if "oshash" in row.keys() else None,
             status=FileStatus(row["status"]),
             local_path=row["local_path"],
             filester_slug=slugs or [],

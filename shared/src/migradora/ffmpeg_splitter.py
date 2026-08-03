@@ -585,6 +585,8 @@ def iter_upload_parts_sliced(
     ffmpeg_timeout: int = 7200,
     skip_check: Callable[[], None] | None = None,
     delete_source: bool = True,
+    skip_part_indices: frozenset[int] = frozenset(),
+    reuse_existing_parts: bool = False,
     on_log: Callable[[str], None] | None = None,
     on_parts_planned: Callable[[int], None] | None = None,
     on_split_progress: Callable[[int, int, int, str, int], None] | None = None,
@@ -704,6 +706,24 @@ def iter_upload_parts_sliced(
         part_name = f"{stem}.PART{idx + 1}{ext}"
         part_path = output_dir / part_name
         part_no = idx + 1
+        if part_no in skip_part_indices:
+            continue
+        if reuse_existing_parts and part_path.is_file():
+            part_size = part_path.stat().st_size
+            if part_size > 0 and part_size <= part_size_bytes:
+                _emit_log(on_log, f"Reusing existing part {part_no}/{num_parts}: {part_name}")
+                yield {
+                    "path": str(part_path),
+                    "filename": part_name,
+                    "size_bytes": part_size,
+                    "part_index": part_no,
+                    "part_count": num_parts,
+                    "is_source": False,
+                    "original_basename": original,
+                    "split_mode": "ffmpeg_slice",
+                    "reused_existing": True,
+                }
+                continue
         if on_split_progress:
             on_split_progress(part_no, 0, part_size_bytes, part_name, num_parts)
         _emit_log(on_log, f"Splitting part {part_no}/{num_parts}: {part_name}")
@@ -744,6 +764,6 @@ def iter_upload_parts_sliced(
             "split_mode": "ffmpeg_slice",
         }
 
-    if delete_source:
+    if delete_source and not skip_part_indices:
         source.unlink(missing_ok=True)
         _emit_log(on_log, f"Removed source after splitting: {source.name}")

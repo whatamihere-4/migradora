@@ -6,12 +6,14 @@ import logging
 import shutil
 import threading
 import time
+from collections.abc import Callable
 from pathlib import Path
 
 from migradora.config import Settings
 from migradora.filester_client import FilesterClient
 from migradora.gofile_client import GofileClient
 from migradora.models import FileStatus, QueueState
+from migradora.oshash import compute_oshash, verify_oshash
 from migradora.queue.manager import QueueManager
 from migradora.splitter import iter_upload_parts
 from migradora.size_limits import (
@@ -21,6 +23,13 @@ from migradora.size_limits import (
 )
 from migradora.transfer_stats import TransferTracker, eta_seconds, format_size
 from migradora.upload_progress import UploadProgressReporter
+from migradora.upload_resume import (
+    UploadedPart,
+    UploadResumeState,
+    delete_upload_resume_state,
+    load_upload_resume_state,
+    save_upload_resume_state,
+)
 from migradora.utils import free_disk_gb
 
 from migradora.filester_folders import (
@@ -188,6 +197,74 @@ class PipelineCoordinator:
         self._current_job_name = ""
         logger.warning("Skipped job %d (disk): %s", job.id, reason)
 
+    def _try_resume_local_file(self, job, job_dir: Path) -> Path | None:
+        candidates: list[Path] = []
+        if job.local_path:
+            candidates.append(Path(job.local_path))
+        candidates.append(job_dir / job.filename)
+
+        for path in candidates:
+            if not path.is_file():
+                continue
+            size = path.stat().st_size
+            if job.size_bytes and size != job.size_bytes:
+                logger.warning(
+                    "Job %d: skip resume %s — size %d != expected %d",
+                    job.id,
+                    path,
+                    size,
+                    job.size_bytes,
+                )
+                continue
+            if job.oshash and not verify_oshash(path, job.oshash):
+                logger.warning("Job %d: skip resume %s — OSHash mismatch", job.id, path)
+                continue
+            logger.info("Job %d: resuming from existing download %s", job.id, path)
+            return path
+        return None
+
+    def _finish_upload_job(
+        self,
+        job,
+        job_dir: Path,
+        local_path: Path,
+        resume_state: UploadResumeState,
+        upload_responses: list[dict],
+        slugs: list[str],
+        was_split: bool,
+        folder_id: str,
+        filester: FilesterClient,
+        job_log: Callable[..., None],
+        upload_phase_started: bool,
+    ) -> None:
+        if was_split:
+            organize_split_parts_into_folder(
+                filester,
+                parent_folder_id=folder_id,
+                folder_name=job.filename,
+                upload_responses=upload_responses,
+            )
+        if upload_phase_started:
+            self._transfer.complete_phase("upload", self._upload_bytes_total)
+        delete_upload_resume_state(job_dir)
+        self._release_job(job.id, str(local_path))
+        self.queue.update_file(
+            job.id,
+            status=FileStatus.UPLOADED,
+            filester_slug=slugs,
+        )
+        self._current_phase = "idle"
+        self._current_job_id = None
+        self._current_job_name = ""
+        self._progress_bytes = 0
+        self._progress_total = 0
+        self._upload_bytes_done = 0
+        self._upload_bytes_total = 0
+        self._upload_reporter = None
+        self._activity_text = ""
+        job_log(f"Job complete: {job.filename}")
+        logger.info("Job %d complete: %s", job.id, job.filename)
+
     def run_loop(self) -> None:
         logger.info("Pipeline started")
         while not self._stop.is_set():
@@ -309,54 +386,65 @@ class PipelineCoordinator:
                 )
                 return
 
-        self._current_phase = "downloading"
-        self._progress_bytes = 0
-        self._progress_total = job.size_bytes or 0
-        self._upload_bytes_done = 0
-        self._upload_bytes_total = 0
-        self._last_touch_at = 0.0
-        self._last_activity_at = 0.0
-        self._activity_text = f"Downloading {job.filename}…"
-        self._transfer.begin_phase("download")
-        self.queue.update_file(job.id, status=FileStatus.DOWNLOADING)
+        resume_state = load_upload_resume_state(job_dir) or UploadResumeState()
+        local_path = self._try_resume_local_file(job, job_dir)
 
-        def on_download_progress(done: int, total: int | None) -> None:
-            self._check_skip(job.id)
-            self._progress_bytes = done
-            if total:
-                self._progress_total = total
-            self._transfer.update_progress("download", done)
-            self._touch_job_progress(job.id)
-            total_bytes = total or self._progress_total or done
-            speed = self._transfer.download_bps
-            pct = (done / total_bytes * 100.0) if total_bytes > 0 else 0.0
-            eta = eta_seconds(max(0, total_bytes - done), speed)
-            status = (
-                f"Downloading: {pct:.1f}% — {format_size(done)}/{format_size(total_bytes)}"
-            )
-            if speed:
-                status += f" @ {format_size(speed)}/s"
-            if eta is not None and eta > 0:
-                status += f" — ETA {int(eta)}s"
-            self._set_activity(status)
+        if local_path is None:
+            self._current_phase = "downloading"
+            self._progress_bytes = 0
+            self._progress_total = job.size_bytes or 0
+            self._upload_bytes_done = 0
+            self._upload_bytes_total = 0
+            self._last_touch_at = 0.0
+            self._last_activity_at = 0.0
+            self._activity_text = f"Downloading {job.filename}…"
+            self._transfer.begin_phase("download")
+            self.queue.update_file(job.id, status=FileStatus.DOWNLOADING)
 
-        with GofileClient(
-            token=self.settings.gofile_token,
-            password=self.settings.gofile_password,
-            cdn_prefer=self.settings.gofile_cdn_prefer,
-            cdn_probe=self.settings.gofile_cdn_probe,
-            download_connections=self.settings.gofile_download_connections,
-        ) as gofile:
-            dest = gofile.safe_dest_path(job_dir, job.filename)
-            gofile.download_file(
-                url,
-                str(dest),
-                expected_size=job.size_bytes or None,
-                throttle_kbps=self.settings.download_throttle_kbps,
-                on_progress=on_download_progress,
-            )
+            def on_download_progress(done: int, total: int | None) -> None:
+                self._check_skip(job.id)
+                self._progress_bytes = done
+                if total:
+                    self._progress_total = total
+                self._transfer.update_progress("download", done)
+                self._touch_job_progress(job.id)
+                total_bytes = total or self._progress_total or done
+                speed = self._transfer.download_bps
+                pct = (done / total_bytes * 100.0) if total_bytes > 0 else 0.0
+                eta = eta_seconds(max(0, total_bytes - done), speed)
+                status = (
+                    f"Downloading: {pct:.1f}% — {format_size(done)}/{format_size(total_bytes)}"
+                )
+                if speed:
+                    status += f" @ {format_size(speed)}/s"
+                if eta is not None and eta > 0:
+                    status += f" — ETA {int(eta)}s"
+                self._set_activity(status)
 
-        local_path = dest
+            url = job.gofile_url or job.download_link
+            with GofileClient(
+                token=self.settings.gofile_token,
+                password=self.settings.gofile_password,
+                cdn_prefer=self.settings.gofile_cdn_prefer,
+                cdn_probe=self.settings.gofile_cdn_probe,
+                download_connections=self.settings.gofile_download_connections,
+            ) as gofile:
+                dest = gofile.safe_dest_path(job_dir, job.filename)
+                gofile.download_file(
+                    url,
+                    str(dest),
+                    expected_size=job.size_bytes or None,
+                    throttle_kbps=self.settings.download_throttle_kbps,
+                    on_progress=on_download_progress,
+                )
+            local_path = dest
+            self._transfer.complete_phase("download", local_path.stat().st_size)
+        else:
+            actual = local_path.stat().st_size
+            self._transfer.begin_phase("download")
+            self._transfer.complete_phase("download", actual)
+            self._append_job_log(job.id, f"Skipping download — using {local_path.name}")
+
         actual_size = local_path.stat().st_size
         if job.size_bytes and actual_size != job.size_bytes:
             logger.warning(
@@ -366,19 +454,33 @@ class PipelineCoordinator:
                 actual_size,
             )
 
+        oshash = compute_oshash(local_path)
+        if job.oshash and not verify_oshash(local_path, job.oshash):
+            raise RuntimeError(
+                f"Job {job.id}: OSHash mismatch on resume "
+                f"(stored {job.oshash}, computed {oshash})"
+            )
+
         self.queue.update_file(
             job.id,
             status=FileStatus.DOWNLOADED,
             local_path=str(local_path),
+            oshash=oshash,
         )
-        self._transfer.complete_phase("download", actual_size)
+        if not resume_state.oshash:
+            resume_state.oshash = oshash
+            resume_state.source_path = str(local_path)
+            save_upload_resume_state(job_dir, resume_state)
 
         self._progress_bytes = 0
         self._progress_total = actual_size
-        self._upload_bytes_done = 0
+        self._upload_bytes_done = resume_state.uploaded_bytes()
         self._upload_bytes_total = actual_size
 
-        slugs: list[str] = []
+        upload_responses: list[dict] = [p.upload_response for p in resume_state.parts]
+        slugs: list[str] = [p.slug for p in resume_state.parts]
+        was_split = resume_state.was_split
+        skip_part_indices = resume_state.skip_part_indices()
         upload_phase_started = False
         folder_path = _job_upload_folder_path(job) or job.gofile_path or "root"
         self._upload_reporter = UploadProgressReporter(
@@ -393,6 +495,8 @@ class PipelineCoordinator:
                 self._upload_reporter.set_activity(line)
 
         def on_parts_planned(count: int) -> None:
+            resume_state.total_parts = count
+            save_upload_resume_state(job_dir, resume_state)
             if self._upload_reporter:
                 self._upload_reporter.prepare_parts(count)
 
@@ -437,8 +541,29 @@ class PipelineCoordinator:
                 f"[Filester] Split/upload to folder {folder_id} "
                 f"({_job_upload_folder_path(job) or job.gofile_path or 'root'})"
             )
-            was_split = False
-            upload_responses: list[dict] = []
+            if skip_part_indices:
+                job_log(
+                    f"Resuming upload — {len(skip_part_indices)} part(s) "
+                    f"already on Filester, skipping re-split where possible"
+                )
+
+            if resume_state.upload_complete():
+                upload_phase_started = bool(resume_state.parts)
+                self._finish_upload_job(
+                    job,
+                    job_dir,
+                    local_path,
+                    resume_state,
+                    upload_responses,
+                    slugs,
+                    was_split,
+                    folder_id,
+                    filester,
+                    job_log,
+                    upload_phase_started,
+                )
+                return
+
             parts_iter = iter(
                 iter_upload_parts(
                     local_path,
@@ -451,6 +576,8 @@ class PipelineCoordinator:
                     ffprobe_bin=self.settings.ffprobe_bin,
                     mkvmerge_bin=self.settings.mkvmerge_bin,
                     ffmpeg_timeout=self.settings.ffmpeg_timeout_sec,
+                    skip_part_indices=skip_part_indices,
+                    reuse_existing_parts=True,
                     on_log=job_log,
                     on_parts_planned=on_parts_planned,
                     on_split_progress=on_split_progress,
@@ -470,6 +597,9 @@ class PipelineCoordinator:
                 part_size = part["size_bytes"]
                 part_index = int(part.get("part_index") or 1)
                 part_count = int(part.get("part_count") or 1)
+                if resume_state.total_parts is None:
+                    resume_state.total_parts = part_count
+                    save_upload_resume_state(job_dir, resume_state)
                 part_base_done = self._upload_bytes_done
 
                 if part_count > 1:
@@ -552,37 +682,35 @@ class PipelineCoordinator:
                 if not filester.verify_upload(slug, part_size):
                     raise RuntimeError(f"Upload verification failed: {slug}")
                 slugs.append(slug)
+                resume_state.parts.append(
+                    UploadedPart(
+                        part_index=part_index,
+                        filename=part["filename"],
+                        size_bytes=part_size,
+                        slug=slug,
+                        upload_response=result,
+                    )
+                )
+                resume_state.was_split = part_count > 1
+                resume_state.total_parts = part_count
+                save_upload_resume_state(job_dir, resume_state)
+                self.queue.update_file(job.id, filester_slug=slugs)
                 self._upload_bytes_done = part_base_done + part_size
                 if part_count > 1 and self._upload_reporter:
                     self._upload_reporter.complete_part(part_index)
                 cleanup_dir(part_path)
                 filester.reset_connections()
 
-            if was_split:
-                organize_split_parts_into_folder(
-                    filester,
-                    parent_folder_id=folder_id,
-                    folder_name=job.filename,
-                    upload_responses=upload_responses,
-                )
-
-        if upload_phase_started:
-            self._transfer.complete_phase("upload", self._upload_bytes_total)
-
-        self._release_job(job.id, str(local_path))
-        self.queue.update_file(
-            job.id,
-            status=FileStatus.UPLOADED,
-            filester_slug=slugs,
-        )
-        self._current_phase = "idle"
-        self._current_job_id = None
-        self._current_job_name = ""
-        self._progress_bytes = 0
-        self._progress_total = 0
-        self._upload_bytes_done = 0
-        self._upload_bytes_total = 0
-        self._upload_reporter = None
-        self._activity_text = ""
-        job_log(f"Job complete: {job.filename}")
-        logger.info("Job %d complete: %s", job.id, job.filename)
+            self._finish_upload_job(
+                job,
+                job_dir,
+                local_path,
+                resume_state,
+                upload_responses,
+                slugs,
+                was_split,
+                folder_id,
+                filester,
+                job_log,
+                upload_phase_started,
+            )

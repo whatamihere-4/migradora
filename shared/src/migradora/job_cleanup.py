@@ -86,6 +86,8 @@ def purge_stale_job_dirs(
         record = queue.get_file(job_id)
         if record and record.status in _KEEP_DIR_STATUSES:
             continue
+        if record and record.status == FileStatus.PENDING and record.local_path:
+            continue
 
         shutil.rmtree(path, ignore_errors=True)
         removed.append(str(path))

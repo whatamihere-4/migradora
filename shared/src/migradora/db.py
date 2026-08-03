@@ -6,7 +6,7 @@ import sqlite3
 from pathlib import Path
 from typing import Any
 
-SCHEMA_VERSION = 2
+SCHEMA_VERSION = 3
 
 SCHEMA_SQL = """
 PRAGMA journal_mode=WAL;
@@ -24,6 +24,7 @@ CREATE TABLE IF NOT EXISTS files (
     size_bytes INTEGER NOT NULL DEFAULT 0,
     download_link TEXT,
     sha256 TEXT,
+    oshash TEXT,
     status TEXT NOT NULL DEFAULT 'pending',
     local_path TEXT,
     filester_slug TEXT DEFAULT '[]',
@@ -99,8 +100,11 @@ def init_db(db_path: str | Path) -> sqlite3.Connection:
         conn.commit()
     else:
         current = row["version"]
-        if current < 2:
-            _migrate_v2(conn)
+        if current < SCHEMA_VERSION:
+            if current < 2:
+                _migrate_v2(conn)
+            if current < 3:
+                _migrate_v3(conn)
             conn.execute("UPDATE schema_version SET version = ?", (SCHEMA_VERSION,))
             conn.commit()
     return conn
@@ -112,6 +116,12 @@ def _migrate_v2(conn: sqlite3.Connection) -> None:
         conn.execute("ALTER TABLE files ADD COLUMN gofile_url TEXT")
     if "jd2_package_name" not in cols:
         conn.execute("ALTER TABLE files ADD COLUMN jd2_package_name TEXT")
+
+
+def _migrate_v3(conn: sqlite3.Connection) -> None:
+    cols = {r[1] for r in conn.execute("PRAGMA table_info(files)").fetchall()}
+    if "oshash" not in cols:
+        conn.execute("ALTER TABLE files ADD COLUMN oshash TEXT")
 
 
 def row_to_dict(row: Any) -> dict[str, Any]:

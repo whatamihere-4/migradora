@@ -88,6 +88,8 @@ def _iter_upload_parts_bytes(
     skip_check: Callable[[], None] | None,
     *,
     delete_source: bool,
+    skip_part_indices: frozenset[int],
+    reuse_existing_parts: bool,
     on_log: Callable[[str], None] | None = None,
     on_parts_planned: Callable[[int], None] | None = None,
     on_split_progress: Callable[[int, int, int, str, int], None] | None = None,
@@ -130,27 +132,49 @@ def _iter_upload_parts_bytes(
         part_size = min(part_size_bytes, total_size - offset)
         part_name = f"{part_prefix}.part{idx + 1:03d}"
         part_path = output_dir / part_name
+        part_no = idx + 1
+        if part_no in skip_part_indices:
+            continue
+        if reuse_existing_parts and part_path.is_file():
+            actual = part_path.stat().st_size
+            if actual == part_size:
+                _emit_log(
+                    on_log,
+                    f"Reusing existing part {part_no}/{num_parts}: {part_name}",
+                )
+                yield {
+                    "path": str(part_path),
+                    "filename": part_name,
+                    "size_bytes": part_size,
+                    "part_index": part_no,
+                    "part_count": num_parts,
+                    "is_source": False,
+                    "original_basename": source.name,
+                    "split_mode": "bytes",
+                    "reused_existing": True,
+                }
+                continue
         if on_split_progress:
-            on_split_progress(idx + 1, 0, part_size, part_name, num_parts)
+            on_split_progress(part_no, 0, part_size, part_name, num_parts)
         _emit_log(
             on_log,
             f"Extracting part {idx + 1}/{num_parts}: {part_name} ({part_size:,} bytes)",
         )
         _extract_part(source, part_path, offset, part_size, skip_check=skip_check)
         if on_split_progress:
-            on_split_progress(idx + 1, part_size, part_size, part_name, num_parts)
+            on_split_progress(part_no, part_size, part_size, part_name, num_parts)
         yield {
             "path": str(part_path),
             "filename": part_name,
             "size_bytes": part_size,
-            "part_index": idx + 1,
+            "part_index": part_no,
             "part_count": num_parts,
             "is_source": False,
             "original_basename": source.name,
             "split_mode": "bytes",
         }
 
-    if delete_source:
+    if delete_source and not skip_part_indices:
         source.unlink(missing_ok=True)
         _emit_log(on_log, f"Removed source after splitting: {source.name}")
 
@@ -168,6 +192,8 @@ def iter_upload_parts(
     mkvmerge_bin: str = "mkvmerge",
     ffmpeg_timeout: int = 7200,
     delete_source: bool = True,
+    skip_part_indices: frozenset[int] = frozenset(),
+    reuse_existing_parts: bool = False,
     on_log: Callable[[str], None] | None = None,
     on_parts_planned: Callable[[int], None] | None = None,
     on_split_progress: Callable[[int, int, int, str, int], None] | None = None,
@@ -200,6 +226,8 @@ def iter_upload_parts(
             ffmpeg_timeout=ffmpeg_timeout,
             skip_check=skip_check,
             delete_source=delete_source,
+            skip_part_indices=skip_part_indices,
+            reuse_existing_parts=reuse_existing_parts,
             on_log=on_log,
             on_parts_planned=on_parts_planned,
             on_split_progress=on_split_progress,
@@ -213,6 +241,8 @@ def iter_upload_parts(
         base_name,
         skip_check,
         delete_source=delete_source,
+        skip_part_indices=skip_part_indices,
+        reuse_existing_parts=reuse_existing_parts,
         on_log=on_log,
         on_parts_planned=on_parts_planned,
         on_split_progress=on_split_progress,
