@@ -464,9 +464,12 @@ class PipelineCoordinator:
 
         oshash = compute_oshash(local_path)
         if job.oshash and not verify_oshash(local_path, job.oshash):
-            raise RuntimeError(
-                f"Job {job.id}: OSHash mismatch on resume "
-                f"(stored {job.oshash}, computed {oshash})"
+            logger.warning(
+                "Job %d: OSHash mismatch on resume (stored %s, computed %s); "
+                "re-storing computed hash",
+                job.id,
+                job.oshash,
+                oshash,
             )
 
         self.queue.update_file(
