@@ -65,6 +65,31 @@ def required_disk_gb(file_size: int, settings: Settings) -> float:
     )
 
 
+def incremental_disk_gb(
+    file_size: int,
+    settings: Settings,
+    *,
+    bytes_already_on_disk: int = 0,
+) -> float:
+    """
+    Free space needed to process a job, accounting for data already in the job dir.
+
+    Peak on-disk usage is ``required_disk_bytes`` (source + one split part for large
+    files). Bytes already stored for this job reduce the incremental need — e.g. a
+    fully downloaded source only needs room for one upload part plus headroom.
+    """
+    if file_size <= 0:
+        return float(settings.min_free_disk_gb)
+    peak_bytes = required_disk_bytes(
+        file_size,
+        settings.filester_max_file_bytes,
+        split_mode=settings.filester_split_mode,
+    )
+    on_disk = max(0, min(bytes_already_on_disk, file_size))
+    incremental_bytes = max(0, peak_bytes - on_disk)
+    return incremental_bytes / _GIB + settings.min_free_disk_gb
+
+
 def oversize_skip_reason(file_size: int, settings: Settings) -> str | None:
     if not settings.auto_skip_oversized or file_size <= 0:
         return None

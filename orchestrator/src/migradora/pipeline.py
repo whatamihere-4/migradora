@@ -18,8 +18,8 @@ from migradora.queue.manager import QueueManager
 from migradora.splitter import iter_upload_parts
 from migradora.size_limits import (
     disk_insufficient_skip_reason,
+    incremental_disk_gb,
     oversize_skip_reason,
-    required_disk_gb,
 )
 from migradora.stashdb_client import StashdbClient, resolve_stashdb_metadata
 from migradora.transfer_stats import TransferTracker, eta_seconds, format_size
@@ -198,6 +198,22 @@ class PipelineCoordinator:
         self._current_job_name = ""
         logger.warning("Skipped job %d (disk): %s", job.id, reason)
 
+    def _job_bytes_on_disk(self, job, job_dir: Path) -> int:
+        """Largest source-sized file already in the job dir (for disk planning)."""
+        best = 0
+        candidates: list[Path] = []
+        if job.local_path:
+            candidates.append(Path(job.local_path))
+        candidates.append(job_dir / job.filename)
+        for path in candidates:
+            if path.is_file():
+                best = max(best, path.stat().st_size)
+        if job_dir.is_dir():
+            for path in job_dir.iterdir():
+                if path.is_file() and not path.name.startswith("."):
+                    best = max(best, path.stat().st_size)
+        return best
+
     def _try_resume_local_file(self, job, job_dir: Path) -> Path | None:
         candidates: list[Path] = []
         if job.local_path:
@@ -371,7 +387,12 @@ class PipelineCoordinator:
             return
 
         if job.size_bytes:
-            need_gb = required_disk_gb(job.size_bytes, self.settings)
+            on_disk = self._job_bytes_on_disk(job, job_dir)
+            need_gb = incremental_disk_gb(
+                job.size_bytes,
+                self.settings,
+                bytes_already_on_disk=on_disk,
+            )
             free_gb = free_disk_gb(self.settings.download_dir)
             if free_gb < need_gb:
                 reason = disk_insufficient_skip_reason(
@@ -387,9 +408,11 @@ class PipelineCoordinator:
                 self._current_job_id = None
                 self._current_job_name = ""
                 logger.warning(
-                    "Paused for disk: job %d needs ~%.0f GB, %.1f GB free",
+                    "Paused for disk: job %d needs ~%.0f GB free "
+                    "(%.1f GB on disk, %.1f GB free)",
                     job.id,
                     need_gb,
+                    on_disk / (1024**3),
                     free_gb,
                 )
                 return

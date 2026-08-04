@@ -7,10 +7,12 @@ import unittest
 from migradora.config import Settings
 from migradora.size_limits import (
     disk_insufficient_skip_reason,
+    incremental_disk_gb,
     is_disk_insufficient_skip_reason,
     is_oversize_budget_skip_reason,
     max_processable_source_bytes,
     oversize_skip_reason,
+    required_disk_gb,
 )
 
 
@@ -58,6 +60,36 @@ class SizeLimitTests(unittest.TestCase):
         self.assertIsNotNone(budget_reason)
         self.assertTrue(is_oversize_budget_skip_reason(budget_reason))
         self.assertFalse(is_disk_insufficient_skip_reason(budget_reason))
+
+    def test_incremental_disk_gb_resume(self) -> None:
+        settings = Settings(
+            min_free_disk_gb=5,
+            filester_max_file_bytes=10_200_547_328,
+            filester_split_mode="bytes",
+        )
+        file_size = 13 * 1024**3
+        full_need = required_disk_gb(file_size, settings)
+        self.assertGreater(full_need, 27.0)
+        resume_need = incremental_disk_gb(
+            file_size,
+            settings,
+            bytes_already_on_disk=file_size,
+        )
+        # Only one upload part + headroom once source is already on disk.
+        self.assertLess(resume_need, 16.0)
+        self.assertGreater(resume_need, 14.0)
+
+    def test_incremental_disk_gb_fresh_download(self) -> None:
+        settings = Settings(
+            min_free_disk_gb=5,
+            filester_max_file_bytes=10_200_547_328,
+            filester_split_mode="bytes",
+        )
+        file_size = 13 * 1024**3
+        self.assertEqual(
+            incremental_disk_gb(file_size, settings, bytes_already_on_disk=0),
+            required_disk_gb(file_size, settings),
+        )
 
 
 if __name__ == "__main__":
