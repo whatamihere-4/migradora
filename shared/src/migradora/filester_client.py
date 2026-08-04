@@ -104,6 +104,7 @@ class FilesterClient:
         retry_delay: int = 30,
         upload_chunk_bytes: int = 1024 * 1024,
         upload_write_timeout_sec: int = 120,
+        upload_throttle_kbps: int = 0,
     ) -> None:
         self.api_base = api_base.rstrip("/")
         self.max_retries = max_retries
@@ -111,6 +112,7 @@ class FilesterClient:
         self._api_key = api_key
         self._upload_chunk_bytes = max(64 * 1024, upload_chunk_bytes)
         self._upload_write_timeout_sec = max(30, upload_write_timeout_sec)
+        self._upload_throttle_kbps = max(0, upload_throttle_kbps)
         self._client = self._make_client()
         self._folder_index: FolderIndex | None = None
         self._nested_folder_cache: dict[tuple[str, str], FilesterFolder] = {}
@@ -811,6 +813,7 @@ class FilesterClient:
                             total_size,
                             progress_hook,
                             chunk_bytes=self._upload_chunk_bytes,
+                            throttle_kbps=self._upload_throttle_kbps,
                         )
                     files = {"file": (file_path.name, fh, "application/octet-stream")}
                     resp = self._client.post("/api/v1/upload", files=files, headers=headers)
@@ -907,11 +910,13 @@ class _ProgressReader:
         on_progress: Callable[[int, int], None],
         *,
         chunk_bytes: int = 1024 * 1024,
+        throttle_kbps: int = 0,
     ) -> None:
         self._file_obj = file_obj
         self._total_size = total_size
         self._on_progress = on_progress
         self._chunk_bytes = max(64 * 1024, chunk_bytes)
+        self._throttle_kbps = max(0, throttle_kbps)
         self._done = 0
 
     def read(self, size: int = -1) -> bytes:
@@ -921,6 +926,8 @@ class _ProgressReader:
         if chunk:
             self._done += len(chunk)
             self._on_progress(self._done, self._total_size)
+            if self._throttle_kbps > 0:
+                time.sleep(len(chunk) / (self._throttle_kbps * 1024))
         return chunk
 
     def __iter__(self):

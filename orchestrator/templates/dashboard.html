@@ -201,6 +201,10 @@
     <div class="card">
       <h2>Jobs</h2>
       <div class="filter-row" id="filters"></div>
+      <div class="row" style="margin-bottom:0.5rem;gap:0.5rem;align-items:center">
+        <input type="text" id="path-filter" placeholder="Path filter e.g. SLR" style="flex:1;min-width:120px;padding:0.35rem 0.5rem;font-size:0.8rem;border:1px solid var(--border);border-radius:6px;background:var(--bg);color:var(--text)" />
+        <span class="meta" id="jobs-count-meta"></span>
+      </div>
       <div id="jobs-list"><div class="empty">Loading…</div></div>
     </div>
   </div>
@@ -209,8 +213,10 @@
     const FILTERS = ['all', 'pending', 'downloading', 'uploading', 'uploaded', 'failed', 'skipped'];
     const STATUS_REFRESH_MS = 1000;
     const JOBS_REFRESH_MS = 10000;
-    const JOBS_LIMIT = 150;
+    const JOBS_LIMIT = 2000;
     let activeFilter = 'all';
+    let pathFilter = '';
+    let jobsTotal = 0;
     let refreshTimer = null;
     let cachedJobs = [];
     let lastJobsFetchAt = 0;
@@ -407,8 +413,11 @@
       if (!force && cachedJobs.length && (now - lastJobsFetchAt) < JOBS_REFRESH_MS) {
         return cachedJobs;
       }
-      const jobsResp = await api(`/jobs?limit=${JOBS_LIMIT}`);
+      const q = new URLSearchParams({ limit: String(JOBS_LIMIT) });
+      if (pathFilter.trim()) q.set('path', pathFilter.trim());
+      const jobsResp = await api(`/jobs?${q}`);
       cachedJobs = jobsResp.jobs || [];
+      jobsTotal = jobsResp.total || cachedJobs.length;
       lastJobsFetchAt = now;
       return cachedJobs;
     }
@@ -477,6 +486,14 @@
 
     function renderJobs(jobs, pipeline, currentJob, eta) {
       const list = document.getElementById('jobs-list');
+      const countMeta = document.getElementById('jobs-count-meta');
+      if (countMeta) {
+        const shown = jobs.length;
+        const total = jobsTotal || shown;
+        countMeta.textContent = shown < total
+          ? `Showing ${shown} of ${total} jobs (raise limit or narrow path filter)`
+          : `${total} job(s)`;
+      }
       const currentId = pipeline && pipeline.current_job_id;
       const phase = pipeline && pipeline.phase;
       let filtered = activeFilter === 'all' ? jobs : jobs.filter(j => j.status === activeFilter);
@@ -652,6 +669,11 @@
       const btn = e.target.closest('[data-skip-id]');
       if (!btn) return;
       skipJob(btn.dataset.skipId, btn.dataset.skipName).catch(err => alert(err.message));
+    });
+
+    document.getElementById('path-filter').addEventListener('change', () => {
+      pathFilter = document.getElementById('path-filter').value;
+      fetchJobs(true).then(refresh);
     });
 
     renderFilters();

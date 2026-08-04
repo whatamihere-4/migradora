@@ -40,6 +40,14 @@ def _env_list(key: str) -> list[str]:
     return [item.strip() for item in raw.split(",") if item.strip()]
 
 
+def _throttle_kbps(kbps_key: str, mbps_key: str, default: int = 0) -> int:
+    """Read throttle from KBPS or MBPS env (MBPS wins if set). 0 = unlimited."""
+    mbps_raw = _env(mbps_key)
+    if mbps_raw:
+        return max(0, int(float(mbps_raw) * 1024))
+    return max(0, _env_int(kbps_key, default))
+
+
 def _webui_port() -> int:
     """Host + container bind port for the web dashboard (WEBUI_PORT or legacy DASHBOARD_PORT)."""
     if _env("WEBUI_PORT"):
@@ -93,6 +101,7 @@ class Settings:
     download_max_retries: int = 5
     download_retry_delay_sec: int = 30
     download_throttle_kbps: int = 0
+    upload_throttle_kbps: int = 0
     upload_max_retries: int = 5
     upload_retry_delay_sec: int = 30
     upload_watchdog_enabled: bool = False
@@ -172,9 +181,14 @@ class Settings:
             stale_job_timeout_sec=_env_int("STALE_JOB_TIMEOUT_SEC", 3600),
             download_max_retries=_env_int("DOWNLOAD_MAX_RETRIES", 5),
             download_retry_delay_sec=_env_int("DOWNLOAD_RETRY_DELAY_SEC", 30),
-            download_throttle_kbps=_env_int("DOWNLOAD_THROTTLE_KBPS", 0),
+            download_throttle_kbps=_throttle_kbps(
+                "DOWNLOAD_THROTTLE_KBPS", "DOWNLOAD_THROTTLE_MBPS", 0
+            ),
             upload_max_retries=_env_int("UPLOAD_MAX_RETRIES", 5),
             upload_retry_delay_sec=_env_int("UPLOAD_RETRY_DELAY_SEC", 30),
+            upload_throttle_kbps=_throttle_kbps(
+                "UPLOAD_THROTTLE_KBPS", "UPLOAD_THROTTLE_MBPS", 0
+            ),
             upload_watchdog_enabled=_env_bool("UPLOAD_WATCHDOG_ENABLED", False),
             upload_watchdog_min_mbps=max(0.1, _env_float("UPLOAD_WATCHDOG_MIN_MBPS", 5.0)),
             upload_watchdog_sustain_sec=max(10, _env_int("UPLOAD_WATCHDOG_SUSTAIN_SEC", 60)),

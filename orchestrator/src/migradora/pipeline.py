@@ -553,6 +553,7 @@ class PipelineCoordinator:
             retry_delay=self.settings.upload_retry_delay_sec,
             upload_chunk_bytes=self.settings.filester_upload_chunk_bytes,
             upload_write_timeout_sec=self.settings.filester_upload_write_timeout_sec,
+            upload_throttle_kbps=self.settings.upload_throttle_kbps,
         ) as filester:
             folder_id = ensure_filester_folder_path(
                 filester,

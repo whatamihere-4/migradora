@@ -433,20 +433,61 @@ class QueueManager:
             ).fetchone()
             return int(row["total"]) if row else 0
 
-    def list_files(self, status: str | None = None, limit: int = 100) -> list[FileRecord]:
+    def count_files(
+        self,
+        status: str | None = None,
+        path_prefix: str | None = None,
+    ) -> int:
+        clauses = ["is_part = 0"]
+        values: list[Any] = []
+        if status:
+            clauses.append("status = ?")
+            values.append(status)
+        if path_prefix:
+            prefix = path_prefix.strip().strip("/")
+            if prefix:
+                like = f"{prefix}%"
+                clauses.append(
+                    "(gofile_path LIKE ? OR parent_folder_path LIKE ?)"
+                )
+                values.extend([like, like])
+        where = " AND ".join(clauses)
         with self.connection() as conn:
-            if status:
-                rows = conn.execute(
-                    """SELECT * FROM files
-                       WHERE is_part=0 AND status=? ORDER BY id ASC LIMIT ?""",
-                    (status, limit),
-                ).fetchall()
-            else:
-                rows = conn.execute(
-                    """SELECT * FROM files
-                       WHERE is_part=0 ORDER BY id ASC LIMIT ?""",
-                    (limit,),
-                ).fetchall()
+            row = conn.execute(
+                f"SELECT COUNT(*) AS n FROM files WHERE {where}",
+                values,
+            ).fetchone()
+            return int(row["n"]) if row else 0
+
+    def list_files(
+        self,
+        status: str | None = None,
+        limit: int = 100,
+        offset: int = 0,
+        path_prefix: str | None = None,
+    ) -> list[FileRecord]:
+        clauses = ["is_part = 0"]
+        values: list[Any] = []
+        if status:
+            clauses.append("status = ?")
+            values.append(status)
+        if path_prefix:
+            prefix = path_prefix.strip().strip("/")
+            if prefix:
+                like = f"{prefix}%"
+                clauses.append(
+                    "(gofile_path LIKE ? OR parent_folder_path LIKE ?)"
+                )
+                values.extend([like, like])
+        where = " AND ".join(clauses)
+        values.extend([limit, offset])
+        with self.connection() as conn:
+            rows = conn.execute(
+                f"""SELECT * FROM files
+                    WHERE {where}
+                    ORDER BY id ASC LIMIT ? OFFSET ?""",
+                values,
+            ).fetchall()
             return [FileRecord.from_row(r) for r in rows]
 
     def reset_active_jobs(self, exclude_ids: list[int] | None = None) -> int:

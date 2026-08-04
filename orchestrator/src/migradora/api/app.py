@@ -158,14 +158,31 @@ def create_app(settings: Settings, orchestrator: Orchestrator) -> FastAPI:
     @app.get("/jobs")
     def jobs(
         status: str | None = Query(None),
-        limit: int = Query(100, ge=1, le=500),
+        path: str | None = Query(
+            None,
+            description="Filter by gofile_path or parent_folder_path prefix (e.g. SLR)",
+        ),
+        limit: int = Query(500, ge=1, le=2000),
+        offset: int = Query(0, ge=0),
     ) -> dict[str, Any]:
-        records = queue.list_files(status=status, limit=limit)
+        total = queue.count_files(status=status, path_prefix=path)
+        records = queue.list_files(
+            status=status,
+            limit=limit,
+            offset=offset,
+            path_prefix=path,
+        )
         jobs = []
         for record in records:
             logs = orchestrator.pipeline.job_logs(record.id)
             jobs.append(_job_payload(record, job_logs=logs or None))
-        return {"jobs": jobs}
+        return {
+            "jobs": jobs,
+            "total": total,
+            "limit": limit,
+            "offset": offset,
+            "path_prefix": path or "",
+        }
 
     @app.post("/resume")
     def resume() -> dict[str, str]:
