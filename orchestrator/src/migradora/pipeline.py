@@ -9,12 +9,17 @@ import time
 from collections.abc import Callable
 from pathlib import Path
 
+import httpx
+from pathvalidate import sanitize_filename
+
 from migradora.config import Settings
 from migradora.filester_client import FilesterClient
 from migradora.gofile_client import GofileClient
+from migradora.http_download import download_url
 from migradora.models import FileStatus, QueueState
 from migradora.oshash import compute_oshash, verify_oshash
 from migradora.queue.manager import QueueManager
+from migradora.realdebrid_client import is_realdebrid_url, RealDebridClient
 from migradora.splitter import iter_upload_parts
 from migradora.size_limits import (
     disk_insufficient_skip_reason,
@@ -61,6 +66,21 @@ def _job_upload_folder_path(job) -> str:
     if "/" in gofile_path:
         return gofile_path.rsplit("/", 1)[0]
     return ""
+
+
+def _job_rd_url(job) -> str | None:
+    if is_realdebrid_url(job.download_link):
+        return (job.download_link or "").strip()
+    if is_realdebrid_url(job.gofile_url):
+        return (job.gofile_url or "").strip()
+    return None
+
+
+def _job_gofile_url(job) -> str | None:
+    if _job_rd_url(job):
+        return None
+    url = job.gofile_url or job.download_link
+    return (url or "").strip() or None
 
 
 def cleanup_dir(path: Path) -> None:
@@ -365,9 +385,10 @@ class PipelineCoordinator:
         logger.info("Pipeline stopped")
 
     def _process_job(self, job) -> None:
-        url = job.gofile_url or job.download_link
-        if not url:
-            raise RuntimeError(f"Job {job.id} has no gofile_url")
+        rd_url = _job_rd_url(job)
+        gofile_url = _job_gofile_url(job)
+        if not rd_url and not gofile_url:
+            raise RuntimeError(f"Job {job.id} has no download URL")
 
         job_dir = Path(self.settings.download_dir) / f"job-{job.id}"
         job_dir.mkdir(parents=True, exist_ok=True)
@@ -452,23 +473,47 @@ class PipelineCoordinator:
                     status += f" — ETA {int(eta)}s"
                 self._set_activity(status)
 
-            url = job.gofile_url or job.download_link
-            with GofileClient(
-                token=self.settings.gofile_token,
-                password=self.settings.gofile_password,
-                cdn_prefer=self.settings.gofile_cdn_prefer,
-                cdn_probe=self.settings.gofile_cdn_probe,
-                download_connections=self.settings.gofile_download_connections,
-            ) as gofile:
-                dest = gofile.safe_dest_path(job_dir, job.filename)
-                gofile.download_file(
-                    url,
-                    str(dest),
-                    expected_size=job.size_bytes or None,
-                    throttle_kbps=self.settings.download_throttle_kbps,
-                    on_progress=on_download_progress,
+            def job_log(line: str) -> None:
+                self._append_job_log(job.id, line)
+
+            if rd_url:
+                self._append_job_log(job.id, f"[RD] Download via Real-Debrid: {job.filename}")
+                with RealDebridClient(self.settings) as rd:
+                    direct = rd.resolve_download_url(rd_url, on_log=job_log)
+                timeout = httpx.Timeout(
+                    connect=self.settings.real_debrid_connect_timeout_sec,
+                    read=self.settings.real_debrid_read_timeout_sec,
+                    write=self.settings.real_debrid_read_timeout_sec,
+                    pool=self.settings.real_debrid_connect_timeout_sec,
                 )
-            local_path = dest
+                with httpx.Client(timeout=timeout, follow_redirects=True) as http:
+                    dest = job_dir / sanitize_filename(job.filename)
+                    download_url(
+                        http,
+                        direct,
+                        dest,
+                        expected_size=job.size_bytes or None,
+                        throttle_kbps=self.settings.download_throttle_kbps,
+                        on_progress=on_download_progress,
+                    )
+                local_path = dest
+            else:
+                with GofileClient(
+                    token=self.settings.gofile_token,
+                    password=self.settings.gofile_password,
+                    cdn_prefer=self.settings.gofile_cdn_prefer,
+                    cdn_probe=self.settings.gofile_cdn_probe,
+                    download_connections=self.settings.gofile_download_connections,
+                ) as gofile:
+                    dest = gofile.safe_dest_path(job_dir, job.filename)
+                    gofile.download_file(
+                        gofile_url,
+                        str(dest),
+                        expected_size=job.size_bytes or None,
+                        throttle_kbps=self.settings.download_throttle_kbps,
+                        on_progress=on_download_progress,
+                    )
+                local_path = dest
             self._transfer.complete_phase("download", local_path.stat().st_size)
         else:
             actual = local_path.stat().st_size

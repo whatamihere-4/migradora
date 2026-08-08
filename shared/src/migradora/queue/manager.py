@@ -4,11 +4,13 @@ from __future__ import annotations
 
 import json
 import sqlite3
+import uuid
 from contextlib import contextmanager
 from typing import Any, Iterator
 
 from migradora.db import init_db, row_to_dict
 from migradora.models import FileRecord, FileStatus, QueueState, QueueStats, utc_now
+from migradora.realdebrid_client import is_realdebrid_url
 
 
 class QueueManager:
@@ -197,6 +199,8 @@ class QueueManager:
         filester_slug: list[str] | None = None,
         last_error: str | None = None,
         download_link: str | None = None,
+        size_bytes: int | None = None,
+        filename: str | None = None,
         gofile_url: str | None = None,
         jd2_package_name: str | None = None,
     ) -> None:
@@ -223,6 +227,12 @@ class QueueManager:
         if download_link is not None:
             fields.append("download_link = ?")
             values.append(download_link)
+        if size_bytes is not None:
+            fields.append("size_bytes = ?")
+            values.append(size_bytes)
+        if filename is not None:
+            fields.append("filename = ?")
+            values.append(filename)
         if gofile_url is not None:
             fields.append("gofile_url = ?")
             values.append(gofile_url)
@@ -489,6 +499,113 @@ class QueueManager:
                 values,
             ).fetchall()
             return [FileRecord.from_row(r) for r in rows]
+
+    def _job_has_rd_link(self, record: FileRecord) -> bool:
+        return is_realdebrid_url(record.download_link) or is_realdebrid_url(record.gofile_url)
+
+    def list_jobs_for_rd_fallback(self, limit: int = 200) -> list[FileRecord]:
+        """Failed jobs (and pending retries) that still use Gofile, not Real-Debrid."""
+        with self.connection() as conn:
+            rows = conn.execute(
+                """SELECT * FROM files
+                   WHERE is_part=0
+                     AND (
+                       status = ?
+                       OR (status = ? AND last_error IS NOT NULL AND last_error != '')
+                     )
+                   ORDER BY id ASC LIMIT ?""",
+                (FileStatus.FAILED.value, FileStatus.PENDING.value, limit),
+            ).fetchall()
+        out: list[FileRecord] = []
+        for row in rows:
+            record = FileRecord.from_row(row)
+            if self._job_has_rd_link(record):
+                continue
+            out.append(record)
+        return out
+
+    def assign_realdebrid_link(
+        self,
+        job_id: int,
+        rd_url: str,
+        *,
+        size_bytes: int | None = None,
+    ) -> bool:
+        url = (rd_url or "").strip()
+        if not is_realdebrid_url(url):
+            raise ValueError("URL must be a Real-Debrid panel or CDN link")
+
+        now = utc_now()
+        with self.connection() as conn:
+            row = conn.execute(
+                "SELECT id FROM files WHERE id=? AND is_part=0",
+                (job_id,),
+            ).fetchone()
+            if not row:
+                return False
+
+            if size_bytes is not None and size_bytes > 0:
+                conn.execute(
+                    """UPDATE files SET download_link=?, status=?, attempts=0,
+                       last_error=NULL, local_path=NULL, filester_slug='[]',
+                       size_bytes=?, updated_at=?
+                       WHERE id=?""",
+                    (
+                        url,
+                        FileStatus.PENDING.value,
+                        size_bytes,
+                        now,
+                        job_id,
+                    ),
+                )
+            else:
+                conn.execute(
+                    """UPDATE files SET download_link=?, status=?, attempts=0,
+                       last_error=NULL, local_path=NULL, filester_slug='[]',
+                       updated_at=?
+                       WHERE id=?""",
+                    (url, FileStatus.PENDING.value, now, job_id),
+                )
+            return True
+
+    def enqueue_realdebrid_job(
+        self,
+        filename: str,
+        parent_folder_path: str,
+        rd_url: str,
+        size_bytes: int = 0,
+    ) -> int:
+        url = (rd_url or "").strip()
+        name = (filename or "").strip()
+        folder = (parent_folder_path or "").strip().strip("/")
+        if not name:
+            raise ValueError("filename is required")
+        if not is_realdebrid_url(url):
+            raise ValueError("URL must be a Real-Debrid panel or CDN link")
+
+        gofile_path = f"{folder}/{name}" if folder else name
+        content_id = f"rd:{uuid.uuid4().hex}"
+        now = utc_now()
+        with self.connection() as conn:
+            cur = conn.execute(
+                """INSERT INTO files (
+                    gofile_content_id, gofile_path, filename, size_bytes,
+                    download_link, status, parent_folder_path,
+                    created_at, updated_at
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                (
+                    content_id,
+                    gofile_path,
+                    name,
+                    max(0, int(size_bytes or 0)),
+                    url,
+                    FileStatus.PENDING.value,
+                    folder,
+                    now,
+                    now,
+                ),
+            )
+            return int(cur.lastrowid or 0)
 
     def reset_active_jobs(self, exclude_ids: list[int] | None = None) -> int:
         """Return stuck downloading/uploading jobs to pending (e.g. after crash)."""

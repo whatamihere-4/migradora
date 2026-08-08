@@ -1,0 +1,293 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Migradora — Real-Debrid</title>
+  <style>
+    *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+    :root {
+      --bg: #0e0e10;
+      --surface: #18181b;
+      --border: #2d2d33;
+      --accent: #6d5dfc;
+      --accent-hover: #8577fd;
+      --text: #e4e4e7;
+      --muted: #71717a;
+      --success: #22c55e;
+      --error: #ef4444;
+      --warn: #f59e0b;
+      --radius: 10px;
+    }
+    body {
+      font-family: 'Segoe UI', system-ui, -apple-system, sans-serif;
+      background: var(--bg);
+      color: var(--text);
+      min-height: 100vh;
+      padding: 2rem 1rem 3rem;
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+    }
+    h1 { font-size: 2rem; font-weight: 700; margin-bottom: 0.25rem; }
+    .subtitle { color: var(--muted); font-size: 0.9rem; margin-bottom: 0.5rem; text-align: center; }
+    .nav { margin-bottom: 1.25rem; display: flex; gap: 0.75rem; flex-wrap: wrap; justify-content: center; }
+    .nav a {
+      color: var(--accent); text-decoration: none; font-size: 0.85rem;
+      padding: 0.35rem 0.65rem; border: 1px solid var(--border); border-radius: 6px;
+    }
+    .nav a:hover { border-color: var(--accent); }
+    .nav a.active { background: var(--accent); color: #fff; border-color: var(--accent); }
+    .wrap { width: 100%; max-width: 960px; }
+    .card {
+      background: var(--surface);
+      border: 1px solid var(--border);
+      border-radius: var(--radius);
+      padding: 1.25rem 1.5rem;
+      margin-bottom: 1rem;
+    }
+    .card h2 { font-size: 0.95rem; font-weight: 600; margin-bottom: 0.85rem; }
+    .meta { font-size: 0.82rem; color: var(--muted); line-height: 1.5; }
+    .meta strong { color: var(--text); }
+    .hint { font-size: 0.75rem; color: var(--muted); margin-top: 0.35rem; }
+    .field { margin-bottom: 0.75rem; }
+    .field label {
+      display: block; font-size: 0.72rem; font-weight: 600;
+      color: var(--muted); text-transform: uppercase; letter-spacing: 0.04em;
+      margin-bottom: 0.3rem;
+    }
+    .field input {
+      width: 100%; padding: 0.55rem 0.65rem;
+      background: var(--bg); border: 1px solid var(--border);
+      border-radius: 6px; color: var(--text); font-size: 0.85rem;
+    }
+    .field input:focus { outline: none; border-color: var(--accent); }
+    .btn {
+      padding: 0.55rem 1rem; font-size: 0.82rem; font-weight: 600;
+      border: none; border-radius: 6px; cursor: pointer; color: #fff;
+      background: var(--accent); transition: background 0.15s;
+    }
+    .btn:hover { background: var(--accent-hover); }
+    .btn:disabled { opacity: 0.5; cursor: not-allowed; }
+    .btn.secondary {
+      background: transparent; border: 1px solid var(--border); color: var(--text);
+    }
+    .btn.secondary:hover { border-color: var(--accent); }
+    .btn.small { padding: 0.4rem 0.75rem; font-size: 0.78rem; }
+    .row { display: flex; flex-wrap: wrap; gap: 0.5rem; align-items: center; }
+    .rd-row {
+      display: grid;
+      grid-template-columns: minmax(0, 1.2fr) minmax(0, 0.9fr) minmax(0, 1.4fr) auto;
+      gap: 0.5rem; align-items: end;
+      padding: 0.75rem 0; border-bottom: 1px solid var(--border);
+    }
+    .rd-row:last-child { border-bottom: none; }
+    .rd-filename { font-weight: 600; font-size: 0.82rem; word-break: break-word; }
+    .rd-folder { font-size: 0.75rem; color: var(--accent); word-break: break-word; }
+    .rd-status { font-size: 0.72rem; color: var(--muted); margin-top: 0.2rem; }
+    .rd-link input { font-size: 0.8rem; }
+    .empty { text-align: center; color: var(--muted); padding: 1.5rem; font-size: 0.85rem; }
+    .flash {
+      padding: 0.65rem 0.85rem; border-radius: 6px; font-size: 0.82rem;
+      margin-bottom: 1rem; display: none;
+    }
+    .flash.ok { display: block; background: rgba(34,197,94,0.12); color: var(--success); border: 1px solid rgba(34,197,94,0.35); }
+    .flash.err { display: block; background: rgba(239,68,68,0.12); color: var(--error); border: 1px solid rgba(239,68,68,0.35); }
+    .pill {
+      display: inline-block; padding: 0.2rem 0.55rem; border-radius: 999px;
+      font-size: 0.72rem; font-weight: 600;
+    }
+    .pill.ok { background: rgba(34,197,94,0.15); color: var(--success); }
+    .pill.warn { background: rgba(245,158,11,0.15); color: var(--warn); }
+    @media (max-width: 720px) {
+      .rd-row { grid-template-columns: 1fr; }
+    }
+  </style>
+</head>
+<body>
+  <div class="wrap">
+    <h1>Real-Debrid fallback</h1>
+    <p class="subtitle">Paste panel or CDN links — jobs queue on the main dashboard</p>
+    <nav class="nav">
+      <a href="/">Queue monitor</a>
+      <a href="/realdebrid" class="active">Real-Debrid</a>
+    </nav>
+
+    <div id="flash" class="flash"></div>
+
+    <div class="card">
+      <h2>CDN server pin</h2>
+      <p class="meta" id="cdn-status">Loading…</p>
+      <p class="hint">Set <code>REAL_DEBRID_PREFERRED_CDN</code> in <code>.env</code> (e.g. <code>nyk7-4</code> or <code>45.download.real-debrid.cloud</code>) and restart the container. Same as apu — no auto-scan.</p>
+    </div>
+
+    <div class="card">
+      <h2>Add new job</h2>
+      <div class="field">
+        <label for="new-filename">Filename</label>
+        <input id="new-filename" type="text" placeholder="video.mp4" autocomplete="off">
+      </div>
+      <div class="field">
+        <label for="new-folder">Filester folder path</label>
+        <input id="new-folder" type="text" placeholder="VR/StudioName" autocomplete="off">
+        <p class="hint">Remembered in your browser. Upload target is resolved via filester-folders.json + saved mappings.</p>
+      </div>
+      <div class="field">
+        <label for="new-url">Real-Debrid link</label>
+        <input id="new-url" type="url" placeholder="https://real-debrid.com/d/…" autocomplete="off">
+      </div>
+      <button class="btn" id="btn-new-submit">Add to queue</button>
+    </div>
+
+    <div class="card">
+      <h2>Failed / retrying jobs</h2>
+      <p class="meta" style="margin-bottom:0.75rem">Assign a Real-Debrid link to re-queue a job. Folder path and filename are kept from the original job.</p>
+      <div id="rd-jobs"><div class="empty">Loading…</div></div>
+    </div>
+  </div>
+
+  <script>
+    const FOLDER_KEY = 'migradora_rd_last_folder';
+    const flashEl = document.getElementById('flash');
+    const cdnStatusEl = document.getElementById('cdn-status');
+    const jobsEl = document.getElementById('rd-jobs');
+    const folderInput = document.getElementById('new-folder');
+
+    function formatBytes(n) {
+      if (!n) return '—';
+      const units = ['B', 'KB', 'MB', 'GB', 'TB'];
+      let v = n, i = 0;
+      while (v >= 1024 && i < units.length - 1) { v /= 1024; i++; }
+      return `${v.toFixed(i > 0 ? 1 : 0)} ${units[i]}`;
+    }
+
+    function showFlash(text, ok) {
+      flashEl.textContent = text;
+      flashEl.className = 'flash ' + (ok ? 'ok' : 'err');
+    }
+
+    function rememberFolder() {
+      const v = folderInput.value.trim();
+      if (v) localStorage.setItem(FOLDER_KEY, v);
+    }
+
+    function restoreFolder() {
+      const v = localStorage.getItem(FOLDER_KEY);
+      if (v) folderInput.value = v;
+    }
+
+    async function loadConfig() {
+      const res = await fetch('/api/realdebrid/config');
+      const data = await res.json();
+      const cdn = data.cdn || {};
+      if (!data.token_set) {
+        cdnStatusEl.innerHTML = '<span class="pill warn">API token not set</span> Add <code>REAL_DEBRID_API_TOKEN</code> to <code>.env</code> and restart.';
+        return;
+      }
+      if (cdn.state === 'pinned' && cdn.winner) {
+        cdnStatusEl.innerHTML = `<span class="pill ok">Pinned</span> <strong>${cdn.winner}</strong>`;
+      } else {
+        cdnStatusEl.innerHTML = '<span class="pill warn">No pin</span> API will use Real-Debrid’s default CDN routing.';
+      }
+    }
+
+    function renderJobs(jobs) {
+      if (!jobs.length) {
+        jobsEl.innerHTML = '<div class="empty">No failed or pending Gofile jobs waiting for a Real-Debrid link.</div>';
+        return;
+      }
+      jobsEl.innerHTML = jobs.map(job => {
+        const err = job.last_error ? `<div class="rd-status">${job.last_error}</div>` : '';
+        const folder = job.parent_folder_path || (job.gofile_path || '').replace(/\/[^/]+$/, '') || '—';
+        return `
+          <div class="rd-row" data-job-id="${job.id}">
+            <div>
+              <div class="rd-filename">#${job.id} ${job.filename}</div>
+              <div class="rd-folder">${folder}</div>
+              <div class="rd-status">${job.status} · ${formatBytes(job.size_bytes)}</div>
+              ${err}
+            </div>
+            <div class="rd-link field" style="margin:0">
+              <label>Real-Debrid link</label>
+              <input type="url" class="rd-url-input" placeholder="https://real-debrid.com/d/…" autocomplete="off">
+            </div>
+            <div></div>
+            <button class="btn small rd-submit-btn" type="button">Queue</button>
+          </div>`;
+      }).join('');
+
+      jobsEl.querySelectorAll('.rd-submit-btn').forEach(btn => {
+        btn.addEventListener('click', async () => {
+          const row = btn.closest('.rd-row');
+          const jobId = Number(row.dataset.jobId);
+          const url = row.querySelector('.rd-url-input').value.trim();
+          if (!url) {
+            showFlash('Paste a Real-Debrid link first.', false);
+            return;
+          }
+          btn.disabled = true;
+          try {
+            const res = await fetch('/api/realdebrid/submit', {
+              method: 'POST',
+              headers: { 'Content-Type': 'application/json' },
+              body: JSON.stringify({ job_id: jobId, url }),
+            });
+            const data = await res.json();
+            if (!res.ok) throw new Error(data.detail || res.statusText);
+            showFlash(`Job #${data.job_id} queued via Real-Debrid (${data.filename}).`, true);
+            await loadJobs();
+          } catch (e) {
+            showFlash(e.message || 'Submit failed', false);
+            btn.disabled = false;
+          }
+        });
+      });
+    }
+
+    async function loadJobs() {
+      const res = await fetch('/api/realdebrid/jobs');
+      const data = await res.json();
+      renderJobs(data.jobs || []);
+    }
+
+    document.getElementById('btn-new-submit').addEventListener('click', async () => {
+      const filename = document.getElementById('new-filename').value.trim();
+      const folder = folderInput.value.trim();
+      const url = document.getElementById('new-url').value.trim();
+      if (!filename || !url) {
+        showFlash('Filename and Real-Debrid link are required.', false);
+        return;
+      }
+      rememberFolder();
+      const btn = document.getElementById('btn-new-submit');
+      btn.disabled = true;
+      try {
+        const res = await fetch('/api/realdebrid/submit', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            filename,
+            parent_folder_path: folder,
+            url,
+          }),
+        });
+        const data = await res.json();
+        if (!res.ok) throw new Error(data.detail || res.statusText);
+        showFlash(`Job #${data.job_id} added (${data.filename}).`, true);
+        document.getElementById('new-url').value = '';
+        document.getElementById('new-filename').value = '';
+        await loadJobs();
+      } catch (e) {
+        showFlash(e.message || 'Submit failed', false);
+      } finally {
+        btn.disabled = false;
+      }
+    });
+
+    folderInput.addEventListener('change', rememberFolder);
+    restoreFolder();
+    loadConfig();
+    loadJobs();
+  </script>
+</body>
+</html>

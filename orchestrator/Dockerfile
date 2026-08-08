@@ -15,6 +15,7 @@ RUN pip install --no-cache-dir \
 COPY shared/src /app/shared/src
 COPY orchestrator/src /app/orchestrator/src
 COPY orchestrator/templates /app/orchestrator/templates
+COPY scripts /app/scripts
 
 ENV PYTHONPATH=/app/shared/src:/app/orchestrator/src
 ENV PYTHONUNBUFFERED=1

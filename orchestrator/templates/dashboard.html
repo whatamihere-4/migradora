@@ -166,12 +166,28 @@
     .filter-row button { padding: 0.35rem 0.65rem; font-size: 0.75rem; }
     .filter-row button.active { background: var(--accent); color: #fff; border: none; border-radius: 6px; }
     .filter-row button:not(.active) { background: transparent; border: 1px solid var(--border); color: var(--muted); border-radius: 6px; cursor: pointer; }
+    .nav { margin-bottom: 1rem; display: flex; gap: 0.75rem; flex-wrap: wrap; justify-content: center; }
+    .nav a {
+      color: var(--accent); text-decoration: none; font-size: 0.85rem;
+      padding: 0.35rem 0.65rem; border: 1px solid var(--border); border-radius: 6px;
+    }
+    .nav a:hover { border-color: var(--accent); }
+    .nav a.active { background: var(--accent); color: #fff; border-color: var(--accent); }
+    .src-badge {
+      font-size: 0.65rem; font-weight: 700; padding: 0.1rem 0.35rem;
+      border-radius: 4px; margin-left: 0.35rem; vertical-align: middle;
+      background: rgba(109, 93, 252, 0.2); color: var(--accent);
+    }
   </style>
 </head>
 <body>
   <div class="wrap">
     <h1>Migradora</h1>
     <p class="subtitle">Gofile → Filester mirror &mdash; queue monitor</p>
+    <nav class="nav">
+      <a href="/" class="active">Queue monitor</a>
+      <a href="/realdebrid">Real-Debrid</a>
+    </nav>
 
     <div class="card">
       <h2>Queue</h2>
@@ -553,10 +569,12 @@
             `<div class="progress-log" data-job-log="${j.id}"></div>` +
             `</div>`
           : '';
+        const rdBadge = j.download_source === 'realdebrid'
+          ? '<span class="src-badge">RD</span>' : '';
         return `<div class="job" data-job-id="${j.id}">
           <div class="job-header">
             <div>
-              <div class="job-title">#${j.id} ${esc(j.filename)}${partHint}</div>
+              <div class="job-title">#${j.id} ${esc(j.filename)}${partHint}${rdBadge}</div>
               ${j.gofile_path ? `<div class="job-folder">${esc(j.gofile_path)}</div>` : ''}
               <div class="job-status ${esc(j.status)}">${esc(j.status)} · ${fmtBytes(j.size_bytes)}${j.attempts > 1 ? ' · attempt ' + j.attempts : ''}</div>
               ${j.last_error ? `<div class="job-error">${esc(j.last_error)}</div>` : ''}

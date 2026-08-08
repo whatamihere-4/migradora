@@ -8,9 +8,11 @@ from typing import TYPE_CHECKING, Any
 
 from fastapi import FastAPI, HTTPException, Query
 from fastapi.responses import HTMLResponse
+from pydantic import BaseModel, Field
 
 from migradora.config import Settings
 from migradora.queue.manager import QueueManager
+from migradora.realdebrid_client import is_realdebrid_url, RealDebridClient, RealDebridError
 from migradora.transfer_stats import (
     compute_queue_eta,
     compute_remaining_bytes,
@@ -21,6 +23,27 @@ if TYPE_CHECKING:
     from migradora.orchestrator import Orchestrator
 
 _DASHBOARD_HTML = Path(__file__).resolve().parents[3] / "templates" / "dashboard.html"
+_REALDEBRID_HTML = Path(__file__).resolve().parents[3] / "templates" / "realdebrid.html"
+
+
+class RealDebridSubmitBody(BaseModel):
+    url: str = Field(..., min_length=8)
+    job_id: int | None = None
+    filename: str | None = None
+    parent_folder_path: str | None = None
+
+
+def _rd_cdn_status(settings: Settings) -> dict[str, Any]:
+    raw = (settings.real_debrid_preferred_cdn or "").strip()
+    if not raw:
+        return {"state": "unset", "winner": None}
+    return {"state": "pinned", "winner": raw}
+
+
+def _job_download_source(record) -> str:
+    if is_realdebrid_url(record.download_link) or is_realdebrid_url(record.gofile_url):
+        return "realdebrid"
+    return "gofile"
 
 
 def _heartbeat_age(state_dir: str, service: str) -> float | None:
@@ -41,6 +64,10 @@ def create_app(settings: Settings, orchestrator: Orchestrator) -> FastAPI:
     def dashboard() -> HTMLResponse:
         return HTMLResponse(_DASHBOARD_HTML.read_text(encoding="utf-8"))
 
+    @app.get("/realdebrid", response_class=HTMLResponse)
+    def realdebrid_page() -> HTMLResponse:
+        return HTMLResponse(_REALDEBRID_HTML.read_text(encoding="utf-8"))
+
     @app.get("/health")
     def health() -> dict[str, Any]:
         pipeline_age = _heartbeat_age(settings.state_dir, "pipeline")
@@ -54,6 +81,7 @@ def create_app(settings: Settings, orchestrator: Orchestrator) -> FastAPI:
         return {
             "status": "ok" if ok else "degraded",
             "gofile_token_set": bool(settings.gofile_token),
+            "real_debrid_token_set": bool(settings.real_debrid_api_token),
             "pipeline": {
                 "alive": pipeline_age is not None and pipeline_age < settings.heartbeat_interval_sec * 3,
                 "last_heartbeat_age_sec": pipeline_age,
@@ -77,6 +105,7 @@ def create_app(settings: Settings, orchestrator: Orchestrator) -> FastAPI:
             "attempts": record.attempts,
             "last_error": record.last_error,
             "filester_slug": record.filester_slug,
+            "download_source": _job_download_source(record),
         }
         if job_logs:
             payload["job_logs"] = job_logs
@@ -223,5 +252,96 @@ def create_app(settings: Settings, orchestrator: Orchestrator) -> FastAPI:
             return orchestrator.skip_job(job_id)
         except ValueError as exc:
             raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+    @app.get("/api/realdebrid/config")
+    def realdebrid_config() -> dict[str, Any]:
+        return {
+            "token_set": bool(settings.real_debrid_api_token),
+            "cdn": _rd_cdn_status(settings),
+        }
+
+    @app.get("/api/realdebrid/jobs")
+    def realdebrid_jobs(limit: int = Query(200, ge=1, le=500)) -> dict[str, Any]:
+        records = queue.list_jobs_for_rd_fallback(limit=limit)
+        jobs = []
+        for record in records:
+            jobs.append(
+                {
+                    "id": record.id,
+                    "filename": record.filename,
+                    "parent_folder_path": record.parent_folder_path,
+                    "gofile_path": record.gofile_path,
+                    "size_bytes": record.size_bytes,
+                    "status": record.status.value,
+                    "last_error": record.last_error,
+                }
+            )
+        return {"jobs": jobs}
+
+    @app.post("/api/realdebrid/submit")
+    def realdebrid_submit(body: RealDebridSubmitBody) -> dict[str, Any]:
+        url = body.url.strip()
+        if not is_realdebrid_url(url):
+            raise HTTPException(
+                status_code=400,
+                detail="URL must be a Real-Debrid panel link (real-debrid.com/d/…) or CDN URL",
+            )
+
+        size_bytes = 0
+        filename_hint = (body.filename or "").strip()
+        try:
+            with RealDebridClient(settings) as rd:
+                meta = rd.resolve_metadata(url)
+                size_bytes = int(meta.get("filesize") or 0)
+                rd_name = (meta.get("filename") or "").strip()
+                if rd_name and not filename_hint:
+                    filename_hint = rd_name
+        except RealDebridError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+        if body.job_id is not None:
+            record = queue.get_file(body.job_id)
+            if not record:
+                raise HTTPException(status_code=404, detail=f"Job {body.job_id} not found")
+            ok = queue.assign_realdebrid_link(
+                body.job_id,
+                url,
+                size_bytes=size_bytes if size_bytes > 0 else None,
+            )
+            if not ok:
+                raise HTTPException(status_code=404, detail=f"Job {body.job_id} not found")
+            orchestrator.resume()
+            return {
+                "status": "ok",
+                "job_id": body.job_id,
+                "filename": record.filename,
+                "parent_folder_path": record.parent_folder_path,
+                "size_bytes": size_bytes or record.size_bytes,
+            }
+
+        folder = (body.parent_folder_path or "").strip().strip("/")
+        name = filename_hint or (body.filename or "").strip()
+        if not name:
+            raise HTTPException(
+                status_code=400,
+                detail="filename is required when creating a new job",
+            )
+        try:
+            job_id = queue.enqueue_realdebrid_job(
+                filename=name,
+                parent_folder_path=folder,
+                rd_url=url,
+                size_bytes=size_bytes,
+            )
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+        orchestrator.resume()
+        return {
+            "status": "ok",
+            "job_id": job_id,
+            "filename": name,
+            "parent_folder_path": folder,
+            "size_bytes": size_bytes,
+        }
 
     return app

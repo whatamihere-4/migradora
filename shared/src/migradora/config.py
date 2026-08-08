@@ -67,6 +67,14 @@ class Settings:
     gofile_cdn_probe: bool = False
     gofile_download_connections: int = 1
 
+    # Real-Debrid (fallback when Gofile traffic limit is hit)
+    real_debrid_api_token: str = ""
+    real_debrid_api_base: str = "https://api.real-debrid.com/rest/1.0"
+    real_debrid_preferred_cdn: str = ""
+    real_debrid_remote: bool = False
+    real_debrid_connect_timeout_sec: int = 15
+    real_debrid_read_timeout_sec: int = 60
+
     # Filester
     filester_api_key: str = ""
     filester_api_base: str = "https://u1.filester.me"
@@ -154,6 +162,17 @@ class Settings:
             gofile_cdn_prefer=_env("GOFILE_CDN_PREFER", "eu").lower() or "eu",
             gofile_cdn_probe=_env_bool("GOFILE_CDN_PROBE", False),
             gofile_download_connections=max(1, _env_int("GOFILE_DOWNLOAD_CONNECTIONS", 1)),
+            real_debrid_api_token=_env("REAL_DEBRID_API_TOKEN"),
+            real_debrid_api_base=_env(
+                "REAL_DEBRID_API_BASE",
+                "https://api.real-debrid.com/rest/1.0",
+            ).rstrip("/"),
+            real_debrid_preferred_cdn=_env("REAL_DEBRID_PREFERRED_CDN"),
+            real_debrid_remote=_env_bool("REAL_DEBRID_REMOTE", False),
+            real_debrid_connect_timeout_sec=max(
+                5, _env_int("REAL_DEBRID_CONNECT_TIMEOUT_SEC", 15)
+            ),
+            real_debrid_read_timeout_sec=max(30, _env_int("REAL_DEBRID_READ_TIMEOUT_SEC", 60)),
             filester_api_key=_env("FILESTER_API_KEY"),
             filester_api_base=_env("FILESTER_API_BASE", "https://u1.filester.me").rstrip("/"),
             filester_root_folder_name=_env("FILESTER_ROOT_FOLDER_NAME"),
