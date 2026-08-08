@@ -2,15 +2,15 @@
 """
 Probe Real-Debrid downloads + torrents for filename matches against migradora jobs.
 
-Usage (on VPS host — recommended; container often lacks outbound API access):
+Usage (on VPS host — recommended):
   export REAL_DEBRID_API_TOKEN=your_token
   ./scripts/probe-realdebrid-match.sh
 
-  # Hunt one file:
+  # Hunt one file (fast — scans torrent list, fetches info only for hits):
   ./scripts/probe-realdebrid-match.sh --search 'VRCONK_barbie_a_porn_parody_8K_180x180_3dh.mp4'
 
-  # Force running inside orchestrator container:
-  PROBE_RD_IN_CONTAINER=1 ./scripts/probe-realdebrid-match.sh
+  # Slow: index every downloaded torrent's file paths (1957+ API calls):
+  ./scripts/probe-realdebrid-match.sh --full-torrent-info
 """
 
 from __future__ import annotations
@@ -44,7 +44,6 @@ def die(msg: str, code: int = 1) -> None:
 
 
 def enable_ipv4_only() -> None:
-    """Prefer IPv4 — many VPS containers have broken IPv6 routes to RD API."""
     if os.environ.get("PROBE_RD_IPV4", "1").strip().lower() in ("0", "false", "no"):
         return
     _orig = socket.getaddrinfo
@@ -56,7 +55,6 @@ def enable_ipv4_only() -> None:
 
 
 def norm_name(name: str) -> str:
-    """Case-insensitive match key; strip path and normalize unicode."""
     base = name.replace("\\", "/").rsplit("/", 1)[-1]
     base = unicodedata.normalize("NFKC", base).strip().lower()
     base = re.sub(r"\s+", " ", base)
@@ -111,9 +109,7 @@ class RDClient:
             except httpx.HTTPError as exc:
                 die(
                     f"GET {path} network error: {exc}\n"
-                    "  Try from the VPS host (not docker): ./scripts/probe-realdebrid-match.sh\n"
-                    "  Or: curl -4 -s -o /dev/null -w '%{http_code}' "
-                    f"-H 'Authorization: Bearer $REAL_DEBRID_API_TOKEN' {API_BASE}/user"
+                    "  Run on VPS host: ./scripts/probe-realdebrid-match.sh"
                 )
             batch = self._parse_list_response(path, resp)
             if not batch:
@@ -152,6 +148,63 @@ class RDClient:
         return data if isinstance(data, dict) else {}
 
 
+class LinkResolver:
+    """Fetch /torrents/info only on demand (cached per torrent id)."""
+
+    def __init__(self, rd: RDClient) -> None:
+        self._rd = rd
+        self._info_cache: dict[str, dict] = {}
+        self._fetch_count = 0
+
+    @property
+    def fetch_count(self) -> int:
+        return self._fetch_count
+
+    def get_info(self, torrent_id: str) -> dict:
+        if not torrent_id:
+            return {}
+        if torrent_id not in self._info_cache:
+            self._info_cache[torrent_id] = self._rd.torrent_info(torrent_id)
+            self._fetch_count += 1
+            time.sleep(0.05)
+        return self._info_cache[torrent_id]
+
+    def link_for_filename(
+        self,
+        torrent_id: str,
+        filename: str,
+        list_link: str = "",
+    ) -> str:
+        if list_link:
+            return list_link.strip()
+        info = self.get_info(torrent_id)
+        return link_from_torrent_info(info, filename)
+
+
+def link_from_torrent_info(info: dict, filename: str) -> str:
+    if not info:
+        return ""
+    target = norm_name(filename)
+    files = info.get("files") or []
+    links = info.get("links") or []
+    selected = [f for f in files if int(f.get("selected") or 0)]
+    if not selected:
+        selected = files
+
+    for idx, f in enumerate(selected):
+        path = (f.get("path") or "").strip()
+        if norm_name(path) == target and idx < len(links):
+            return (links[idx] or "").strip()
+
+    if norm_name(info.get("filename") or "") == target and links:
+        return (links[0] or "").strip()
+
+    if len(selected) == 1 and links:
+        return (links[0] or "").strip()
+
+    return (links[0] or "").strip() if links else ""
+
+
 def load_queue_filenames(db_path: Path) -> list[dict]:
     if not db_path.is_file():
         return []
@@ -179,163 +232,170 @@ def load_filename_list(path: Path) -> list[dict]:
     ]
 
 
-def add_entry(
-    store: dict[str, list[dict]],
-    key: str,
-    source: str,
-    label: str,
-    link: str,
-    extra: str = "",
-) -> None:
-    if not key:
-        return
-    store.setdefault(key, []).append(
-        {"source": source, "label": label, "link": link, "extra": extra}
-    )
+def index_downloads(downloads: list[dict]) -> dict[str, list[dict]]:
+    out: dict[str, list[dict]] = {}
+    for item in downloads:
+        fn = (item.get("filename") or "").strip()
+        key = norm_name(fn)
+        if not key:
+            continue
+        link = (item.get("download") or item.get("link") or "").strip()
+        out.setdefault(key, []).append(
+            {
+                "source": "downloads",
+                "label": fn,
+                "link": link,
+                "extra": f"{item.get('filesize', 0)} B",
+            }
+        )
+    return out
 
 
-def build_indexes(
+def index_torrent_names(torrents: list[dict]) -> dict[str, list[dict]]:
+    out: dict[str, list[dict]] = {}
+    for t in torrents:
+        tid = (t.get("id") or "").strip()
+        tname = (t.get("filename") or "").strip()
+        key = norm_name(tname)
+        if not key:
+            continue
+        links = t.get("links") or []
+        list_link = (links[0] or "").strip() if links else ""
+        out.setdefault(key, []).append(
+            {
+                "source": "torrents.name",
+                "torrent_id": tid,
+                "label": tname,
+                "link": list_link,
+                "extra": f"id={tid} status={t.get('status')}",
+            }
+        )
+    return out
+
+
+def build_torrent_file_index(
     rd: RDClient,
-    *,
-    torrent_info: bool,
-    use_downloads: bool,
-    use_torrents: bool,
-) -> tuple[dict[str, list[dict]], dict[str, list[dict]], dict[str, list[dict]]]:
-    """Returns (downloads_by_name, torrent_name_by_name, torrent_file_by_name)."""
-    downloads_by: dict[str, list[dict]] = {}
-    torrent_name_by: dict[str, list[dict]] = {}
-    torrent_file_by: dict[str, list[dict]] = {}
-
-    if use_downloads:
-        print("Fetching GET /downloads …")
-        downloads = rd.list_downloads()
-        print(f"  {len(downloads)} download history entries")
-        for item in downloads:
-            fn = (item.get("filename") or "").strip()
-            key = norm_name(fn)
-            link = (item.get("download") or item.get("link") or "").strip()
-            add_entry(
-                downloads_by,
-                key,
-                "downloads",
-                fn,
-                link,
-                extra=f"{item.get('filesize', 0)} B",
-            )
-    else:
-        print("Skipping GET /downloads")
-
-    downloaded: list[dict] = []
-    if use_torrents:
-        print("Fetching GET /torrents …")
-        torrents = rd.list_torrents()
-        print(f"  {len(torrents)} torrent list entries")
-
-        downloaded = [t for t in torrents if (t.get("status") or "") == "downloaded"]
-        print(f"  {len(downloaded)} with status=downloaded")
-
-        for t in torrents:
-            tid = (t.get("id") or "").strip()
-            tname = (t.get("filename") or "").strip()
-            key = norm_name(tname)
-            links = t.get("links") or []
-            link = links[0] if links else ""
-            add_entry(
-                torrent_name_by,
-                key,
-                "torrents.name",
-                tname,
-                link,
-                extra=f"id={tid} status={t.get('status')}",
-            )
-    else:
-        print("Skipping GET /torrents")
-
-    if torrent_info and downloaded:
-        print(f"Fetching GET /torrents/info/{{id}} for {len(downloaded)} downloaded torrents …")
-        for i, t in enumerate(downloaded, 1):
-            tid = (t.get("id") or "").strip()
-            if not tid:
+    downloaded: list[dict],
+) -> dict[str, list[dict]]:
+    """Slow path: GET /torrents/info for every downloaded torrent."""
+    out: dict[str, list[dict]] = {}
+    total = len(downloaded)
+    print(f"Fetching GET /torrents/info/{{id}} for {total} downloaded torrents …")
+    for i, t in enumerate(downloaded, 1):
+        tid = (t.get("id") or "").strip()
+        if not tid:
+            continue
+        info = rd.torrent_info(tid)
+        files = info.get("files") or []
+        links = info.get("links") or []
+        selected = [f for f in files if int(f.get("selected") or 0)]
+        if not selected:
+            selected = files
+        for idx, f in enumerate(selected):
+            path = (f.get("path") or "").strip()
+            key = norm_name(path)
+            if not key:
                 continue
-            info = rd.torrent_info(tid)
-            files = info.get("files") or []
-            links = info.get("links") or []
-            selected = [f for f in files if int(f.get("selected") or 0)]
-            if not selected:
-                selected = files
-            for idx, f in enumerate(selected):
-                path = (f.get("path") or "").strip()
-                key = norm_name(path)
-                link = ""
-                if idx < len(links):
-                    link = (links[idx] or "").strip()
-                add_entry(
-                    torrent_file_by,
-                    key,
-                    "torrents.file",
-                    path.lstrip("/"),
-                    link,
-                    extra=f"torrent={info.get('filename', t.get('filename', ''))} id={tid}",
-                )
-            if i % 25 == 0 or i == len(downloaded):
-                print(f"  … {i}/{len(downloaded)} torrent infos fetched")
-            time.sleep(0.05)
-
-    return downloads_by, torrent_name_by, torrent_file_by
+            link = ""
+            if idx < len(links):
+                link = (links[idx] or "").strip()
+            out.setdefault(key, []).append(
+                {
+                    "source": "torrents.file",
+                    "torrent_id": tid,
+                    "label": path.lstrip("/"),
+                    "link": link,
+                    "extra": f"torrent={info.get('filename', t.get('filename', ''))} id={tid}",
+                }
+            )
+        if i % 25 == 0 or i == total:
+            print(f"  … {i}/{total} torrent infos fetched")
+        time.sleep(0.05)
+    return out
 
 
-def pick_best(matches: list[dict]) -> dict | None:
-    if not matches:
-        return None
-    with_link = [m for m in matches if m.get("link")]
-    return with_link[0] if with_link else matches[0]
-
-
-def collect_substring_matches(
+def torrent_candidates_for_query(
     query: str,
-    downloads_by: dict[str, list[dict]],
     torrent_name_by: dict[str, list[dict]],
-    torrent_file_by: dict[str, list[dict]],
+    *,
+    max_substring: int = 30,
 ) -> list[dict]:
     q = norm_name(query)
     if not q:
         return []
 
+    seen: set[str] = set()
     hits: list[dict] = []
-    seen: set[tuple[str, str, str]] = set()
 
-    def scan(store: dict[str, list[dict]], source_label: str) -> None:
-        for key, entries in store.items():
-            if q == key or q in key or key in q:
-                for entry in entries:
-                    sig = (source_label, entry.get("label", ""), entry.get("link", ""))
-                    if sig in seen:
-                        continue
-                    seen.add(sig)
-                    hits.append({**entry, "match_key": key, "source_label": source_label})
+    def add(entries: list[dict]) -> None:
+        for entry in entries:
+            tid = entry.get("torrent_id") or ""
+            if tid in seen:
+                continue
+            seen.add(tid)
+            hits.append(entry)
 
-    scan(downloads_by, "downloads")
-    scan(torrent_name_by, "torrents.name")
-    scan(torrent_file_by, "torrents.file")
+    add(torrent_name_by.get(q, []))
+
+    if len(hits) < max_substring:
+        for key, entries in torrent_name_by.items():
+            if key == q:
+                continue
+            if q in key or key in q:
+                add(entries)
+                if len(hits) >= max_substring:
+                    break
+
     return hits
 
 
-def print_search_results(query: str, hits: list[dict]) -> None:
+def run_search(rd: RDClient, query: str, use_downloads: bool) -> None:
+    print(f"Search mode: {query}")
+    print(f"Normalized:  {norm_name(query)}")
+
+    downloads_by: dict[str, list[dict]] = {}
+    if use_downloads:
+        print("Fetching GET /downloads …")
+        downloads_by = index_downloads(rd.list_downloads())
+        print(f"  {sum(len(v) for v in downloads_by.values())} entries")
+
+    print("Fetching GET /torrents …")
+    torrents = rd.list_torrents()
+    torrent_name_by = index_torrent_names(torrents)
+    print(f"  {len(torrents)} torrents, {len(torrent_name_by)} unique names")
+
+    q = norm_name(query)
+    resolver = LinkResolver(rd)
+
     print()
     print("=" * 60)
     print(f"SEARCH: {query}")
-    print(f"Normalized: {norm_name(query)}")
     print("=" * 60)
-    if not hits:
-        print("No matches (exact or substring) in indexed RD data.")
-        return
-    print(f"Found {len(hits)} match(es):")
-    for i, hit in enumerate(hits, 1):
-        link = hit.get("link") or "(no link)"
-        print(f"\n[{i}] {hit.get('source_label')} — {hit.get('label')}")
-        if hit.get("extra"):
-            print(f"     {hit['extra']}")
-        print(f"     link: {link}")
+
+    dl_hits = downloads_by.get(q, [])
+    if dl_hits:
+        print(f"\n/downloads exact ({len(dl_hits)}):")
+        for h in dl_hits:
+            print(f"  {h['label']}")
+            print(f"  link: {h.get('link') or '(no link)'}")
+
+    candidates = torrent_candidates_for_query(query, torrent_name_by)
+    if candidates:
+        print(f"\nTorrent list matches ({len(candidates)}):")
+        for i, c in enumerate(candidates, 1):
+            link = resolver.link_for_filename(
+                c.get("torrent_id", ""),
+                query,
+                c.get("link", ""),
+            )
+            print(f"\n  [{i}] {c['label']}")
+            print(f"       {c.get('extra', '')}")
+            print(f"       link: {link or '(no link — torrent may not be downloaded)'}")
+    elif not dl_hits:
+        print("No exact torrent-name match. Try a shorter substring query (e.g. barbie_a_porn_parody).")
+
+    if resolver.fetch_count:
+        print(f"\n(API: {resolver.fetch_count} torrent info fetch(es) for links)")
 
 
 def report(
@@ -343,14 +403,16 @@ def report(
     downloads_by: dict[str, list[dict]],
     torrent_name_by: dict[str, list[dict]],
     torrent_file_by: dict[str, list[dict]],
+    resolver: LinkResolver,
     *,
     show_samples: int,
 ) -> None:
     stats = {
         "downloads_exact": 0,
         "torrent_name_exact": 0,
+        "torrent_name_with_link": 0,
         "torrent_file_exact": 0,
-        "any_exact": 0,
+        "any_with_link": 0,
         "none": 0,
     }
     unmatched: list[dict] = []
@@ -359,63 +421,92 @@ def report(
     for job in jobs:
         fn = (job.get("filename") or "").strip()
         key = norm_name(fn)
-        d = pick_best(downloads_by.get(key, []))
-        tn = pick_best(torrent_name_by.get(key, []))
-        tf = pick_best(torrent_file_by.get(key, []))
+
+        d_entries = downloads_by.get(key, [])
+        d = d_entries[0] if d_entries else None
+        d_link = (d.get("link") or "").strip() if d else ""
+
+        tn_entries = torrent_name_by.get(key, [])
+        tn = tn_entries[0] if tn_entries else None
+        tn_link = ""
+        if tn:
+            tn_link = resolver.link_for_filename(
+                tn.get("torrent_id", ""),
+                fn,
+                tn.get("link", ""),
+            )
+
+        tf_entries = torrent_file_by.get(key, [])
+        tf = tf_entries[0] if tf_entries else None
+        tf_link = (tf.get("link") or "").strip() if tf else ""
+
+        best_link = d_link or tn_link or tf_link
+
         if d:
             stats["downloads_exact"] += 1
         if tn:
             stats["torrent_name_exact"] += 1
+            if tn_link:
+                stats["torrent_name_with_link"] += 1
         if tf:
             stats["torrent_file_exact"] += 1
-        if d or tn or tf:
-            stats["any_exact"] += 1
+        if best_link:
+            stats["any_with_link"] += 1
             if len(matched_samples) < show_samples:
                 matched_samples.append(
                     {
                         "job_id": job.get("id"),
                         "filename": fn,
-                        "downloads": d,
-                        "torrent_name": tn,
-                        "torrent_file": tf,
+                        "link": best_link,
+                        "via": (
+                            "downloads" if d_link else
+                            "torrent_name" if tn_link else "torrent_file"
+                        ),
                     }
                 )
         else:
-            stats["none"] += 1
-            unmatched.append(job)
+            if tn or d or tf:
+                if len(matched_samples) < show_samples:
+                    matched_samples.append(
+                        {
+                            "job_id": job.get("id"),
+                            "filename": fn,
+                            "link": "",
+                            "via": "matched but no link",
+                        }
+                    )
+            else:
+                stats["none"] += 1
+                unmatched.append(job)
 
     total = len(jobs)
     print()
     print("=" * 60)
     print("MATCH REPORT (exact normalized filename)")
     print("=" * 60)
-    print(f"Jobs tested:              {total}")
+    print(f"Jobs tested:                    {total}")
     if total:
         pct = lambda n: f"{100.0 * n / total:.1f}%"
-        print(f"Matched via /downloads:   {stats['downloads_exact']} ({pct(stats['downloads_exact'])})")
-        print(f"Matched torrent name:     {stats['torrent_name_exact']} ({pct(stats['torrent_name_exact'])})")
-        print(f"Matched torrent file path:{stats['torrent_file_exact']} ({pct(stats['torrent_file_exact'])})")
-        print(f"Matched any source:       {stats['any_exact']} ({pct(stats['any_exact'])})")
-        print(f"No exact match:           {stats['none']} ({pct(stats['none'])})")
+        print(f"Matched /downloads:             {stats['downloads_exact']} ({pct(stats['downloads_exact'])})")
+        print(f"Matched torrent name (list):    {stats['torrent_name_exact']} ({pct(stats['torrent_name_exact'])})")
+        print(f"Torrent name → resolved link:   {stats['torrent_name_with_link']} ({pct(stats['torrent_name_with_link'])})")
+        print(f"Matched torrent file path:      {stats['torrent_file_exact']} ({pct(stats['torrent_file_exact'])})")
+        print(f"Any source with RD link:        {stats['any_with_link']} ({pct(stats['any_with_link'])})")
+        print(f"No match:                       {stats['none']} ({pct(stats['none'])})")
+    print(f"Torrent info API calls:         {resolver.fetch_count}")
 
     if matched_samples:
         print()
         print(f"Sample matches (first {len(matched_samples)}):")
         for m in matched_samples:
+            link = m.get("link") or "(no link)"
+            short = link[:90] + ("…" if len(link) > 90 else "")
             print(f"  #{m['job_id']} {m['filename']}")
-            for label, hit in (
-                ("downloads", m["downloads"]),
-                ("torrent_name", m["torrent_name"]),
-                ("torrent_file", m["torrent_file"]),
-            ):
-                if hit:
-                    link = hit.get("link") or "(no link in API response)"
-                    short = link[:80] + ("…" if len(link) > 80 else "")
-                    print(f"    {label}: {hit['source']} — {short}")
+            print(f"    {m.get('via')}: {short}")
 
     if unmatched and show_samples:
         print()
-        print(f"Unmatched sample (first {min(show_samples, len(unmatched))}):")
+        print(f"Unmatched (first {min(show_samples, len(unmatched))}):")
         for job in unmatched[:show_samples]:
             err = (job.get("last_error") or "")[:60]
             print(f"  #{job['id']} {job['filename']}  [{job.get('status')}] {err}")
@@ -432,51 +523,50 @@ def main() -> None:
     parser.add_argument(
         "--db",
         default=os.environ.get("DB_PATH", "/data/state/queue.db"),
-        help="SQLite queue path (default: DB_PATH or /data/state/queue.db)",
+        help="SQLite queue path",
     )
     parser.add_argument(
         "--filenames",
         type=Path,
-        help="Text file with one filename per line (instead of queue.db)",
+        help="Text file with one filename per line",
     )
     parser.add_argument(
         "--search",
         metavar="FILENAME",
-        help="Search RD indexes for this filename (exact + substring); skips queue report",
+        help="Search torrent list for this filename; resolve links for hits only",
     )
     parser.add_argument(
-        "--no-torrent-info",
+        "--full-torrent-info",
         action="store_true",
-        help="Skip GET /torrents/info (faster; no torrent file path matching)",
+        help="Index every downloaded torrent's files (slow; thousands of API calls)",
     )
     parser.add_argument(
         "--no-downloads",
         action="store_true",
-        help="Skip GET /downloads (use torrent list only)",
+        help="Skip GET /downloads",
     )
     parser.add_argument(
         "--torrents-only",
         action="store_true",
-        help="Only fetch GET /torrents (skip downloads history)",
+        help="Only use GET /torrents",
     )
     parser.add_argument(
         "--samples",
         type=int,
         default=15,
-        help="How many match/unmatch examples to print",
-    )
-    parser.add_argument(
-        "--json",
-        action="store_true",
-        help="Print full indexes as JSON (large)",
+        help="Sample lines in report",
     )
     args = parser.parse_args()
 
     use_downloads = not args.no_downloads and not args.torrents_only
-    use_torrents = True
 
-    jobs: list[dict] = []
-    if not args.search:
+    rd = RDClient()
+    try:
+        if args.search:
+            run_search(rd, args.search, use_downloads=use_downloads)
+            return
+
+        jobs: list[dict] = []
         if args.filenames:
             jobs = load_filename_list(args.filenames)
             print(f"Loaded {len(jobs)} filenames from {args.filenames}")
@@ -486,49 +576,39 @@ def main() -> None:
             if jobs:
                 print(f"Loaded {len(jobs)} failed/pending jobs from {db_path}")
             else:
-                print(f"No failed/pending jobs in {db_path} — pass --filenames or fix --db")
+                print(f"No failed/pending jobs in {db_path}")
 
-    rd = RDClient()
-    try:
-        downloads_by, torrent_name_by, torrent_file_by = build_indexes(
-            rd,
-            torrent_info=not args.no_torrent_info,
-            use_downloads=use_downloads,
-            use_torrents=use_torrents,
-        )
-    finally:
-        rd.close()
+        downloads_by: dict[str, list[dict]] = {}
+        if use_downloads:
+            print("Fetching GET /downloads …")
+            downloads_by = index_downloads(rd.list_downloads())
+            print(f"  {sum(len(v) for v in downloads_by.values())} entries")
+        else:
+            print("Skipping GET /downloads")
 
-    if args.search:
-        hits = collect_substring_matches(
-            args.search,
+        print("Fetching GET /torrents …")
+        torrents = rd.list_torrents()
+        torrent_name_by = index_torrent_names(torrents)
+        downloaded = [t for t in torrents if (t.get("status") or "") == "downloaded"]
+        print(f"  {len(torrents)} torrents, {len(downloaded)} downloaded, {len(torrent_name_by)} unique names")
+
+        torrent_file_by: dict[str, list[dict]] = {}
+        if args.full_torrent_info:
+            torrent_file_by = build_torrent_file_index(rd, downloaded)
+        else:
+            print("Lazy mode: torrent info fetched only for matched jobs (not all 1957 torrents)")
+
+        resolver = LinkResolver(rd)
+        report(
+            jobs,
             downloads_by,
             torrent_name_by,
             torrent_file_by,
+            resolver,
+            show_samples=args.samples,
         )
-        print_search_results(args.search, hits)
-        return
-
-    if args.json:
-        print(
-            json.dumps(
-                {
-                    "downloads": downloads_by,
-                    "torrent_names": torrent_name_by,
-                    "torrent_files": torrent_file_by,
-                },
-                indent=2,
-            )
-        )
-        return
-
-    report(
-        jobs,
-        downloads_by,
-        torrent_name_by,
-        torrent_file_by,
-        show_samples=args.samples,
-    )
+    finally:
+        rd.close()
 
 
 if __name__ == "__main__":
