@@ -13,6 +13,7 @@ from pydantic import BaseModel, Field
 from migradora.config import Settings
 from migradora.queue.manager import QueueManager
 from migradora.realdebrid_client import is_realdebrid_url, RealDebridClient, RealDebridError
+from migradora.realdebrid_match import auto_match_jobs
 from migradora.transfer_stats import (
     compute_queue_eta,
     compute_remaining_bytes,
@@ -261,7 +262,7 @@ def create_app(settings: Settings, orchestrator: Orchestrator) -> FastAPI:
         }
 
     @app.get("/api/realdebrid/jobs")
-    def realdebrid_jobs(limit: int = Query(200, ge=1, le=500)) -> dict[str, Any]:
+    def realdebrid_jobs(limit: int = Query(500, ge=1, le=500)) -> dict[str, Any]:
         records = queue.list_jobs_for_rd_fallback(limit=limit)
         jobs = []
         for record in records:
@@ -342,6 +343,65 @@ def create_app(settings: Settings, orchestrator: Orchestrator) -> FastAPI:
             "filename": name,
             "parent_folder_path": folder,
             "size_bytes": size_bytes,
+        }
+
+    @app.post("/api/realdebrid/auto-match")
+    def realdebrid_auto_match(
+        dry_run: bool = Query(False),
+        limit: int = Query(500, ge=1, le=500),
+    ) -> dict[str, Any]:
+        if not settings.real_debrid_api_token:
+            raise HTTPException(status_code=400, detail="REAL_DEBRID_API_TOKEN is not set")
+
+        records = queue.list_jobs_for_rd_fallback(limit=limit)
+        jobs = [
+            {
+                "id": r.id,
+                "filename": r.filename,
+                "size_bytes": r.size_bytes,
+                "parent_folder_path": r.parent_folder_path,
+            }
+            for r in records
+        ]
+        try:
+            with RealDebridClient(settings) as rd:
+                match_result = auto_match_jobs(rd, jobs)
+        except RealDebridError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+        applied = 0
+        if not dry_run:
+            for hit in match_result.matched:
+                ok = queue.assign_realdebrid_link(
+                    hit.job_id,
+                    hit.url,
+                    size_bytes=hit.size_bytes if hit.size_bytes > 0 else None,
+                )
+                if ok:
+                    applied += 1
+            if applied:
+                orchestrator.resume()
+
+        return {
+            "status": "ok",
+            "dry_run": dry_run,
+            "jobs_considered": len(jobs),
+            "matched": len(match_result.matched),
+            "applied": applied if not dry_run else 0,
+            "unmatched": len(match_result.unmatched),
+            "ambiguous": len(match_result.ambiguous),
+            "torrent_info_fetches": match_result.torrent_info_fetches,
+            "unmatched_jobs": match_result.unmatched,
+            "ambiguous_jobs": match_result.ambiguous,
+            "matched_jobs": [
+                {
+                    "id": m.job_id,
+                    "filename": m.filename,
+                    "url": m.url,
+                    "torrent_id": m.torrent_id,
+                }
+                for m in match_result.matched[:50]
+            ],
         }
 
     return app

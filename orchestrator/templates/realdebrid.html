@@ -140,8 +140,24 @@
     </div>
 
     <div class="card">
-      <h2>Failed / retrying jobs</h2>
-      <p class="meta" style="margin-bottom:0.75rem">Assign a Real-Debrid link to re-queue a job. Folder path and filename are kept from the original job.</p>
+      <h2>Auto-match from RD library</h2>
+      <p class="meta" style="margin-bottom:0.75rem">
+        Matches failed/retrying jobs to your Real-Debrid torrent list by exact filename
+        (same as the probe script). Fetches torrent info only for matches — typically ~1–2 min for ~167 jobs.
+      </p>
+      <div class="row">
+        <button class="btn" id="btn-auto-match" type="button">Auto-match &amp; queue</button>
+        <button class="btn secondary" id="btn-auto-dry" type="button">Preview (dry run)</button>
+      </div>
+      <p class="hint" id="auto-match-hint"></p>
+    </div>
+
+    <div class="card">
+      <h2>Manual — failed / retrying jobs</h2>
+      <p class="meta" style="margin-bottom:0.75rem">
+        Jobs that did not auto-match (or duplicates). Paste a Real-Debrid link and click Queue.
+        Folder path and filename stay from the original job.
+      </p>
       <div id="rd-jobs"><div class="empty">Loading…</div></div>
     </div>
   </div>
@@ -249,6 +265,37 @@
       const data = await res.json();
       renderJobs(data.jobs || []);
     }
+
+    async function runAutoMatch(dryRun) {
+      const btn = dryRun ? document.getElementById('btn-auto-dry') : document.getElementById('btn-auto-match');
+      const other = dryRun ? document.getElementById('btn-auto-match') : document.getElementById('btn-auto-dry');
+      const hint = document.getElementById('auto-match-hint');
+      btn.disabled = true;
+      other.disabled = true;
+      hint.textContent = dryRun ? 'Running preview…' : 'Matching and queueing…';
+      try {
+        const res = await fetch(`/api/realdebrid/auto-match?dry_run=${dryRun ? 'true' : 'false'}`, {
+          method: 'POST',
+        });
+        const data = await res.json();
+        if (!res.ok) throw new Error(data.detail || res.statusText);
+        const msg = dryRun
+          ? `Preview: ${data.matched}/${data.jobs_considered} would queue (${data.unmatched} need manual links).`
+          : `Queued ${data.applied} jobs via Real-Debrid (${data.unmatched} still need manual links).`;
+        showFlash(msg, true);
+        hint.textContent = `${data.torrent_info_fetches} torrent info API call(s).`;
+        if (!dryRun) await loadJobs();
+      } catch (e) {
+        showFlash(e.message || 'Auto-match failed', false);
+        hint.textContent = '';
+      } finally {
+        btn.disabled = false;
+        other.disabled = false;
+      }
+    }
+
+    document.getElementById('btn-auto-match').addEventListener('click', () => runAutoMatch(false));
+    document.getElementById('btn-auto-dry').addEventListener('click', () => runAutoMatch(true));
 
     document.getElementById('btn-new-submit').addEventListener('click', async () => {
       const filename = document.getElementById('new-filename').value.trim();

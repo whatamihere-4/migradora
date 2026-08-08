@@ -2,13 +2,18 @@
 
 from __future__ import annotations
 
+import json
 import re
+import time
+import unicodedata
 from typing import Callable
 from urllib.parse import urlparse, urlunparse
 
 import httpx
 
 from migradora.config import Settings
+
+_PAGE_LIMIT = 5000
 
 _PANEL_LINK_RE = re.compile(
     r"^https?://(?:www\.)?real-debrid\.com/d/([A-Za-z0-9]+)/?(?:\?.*)?$",
@@ -132,6 +137,78 @@ class RealDebridClient:
 
     def __exit__(self, *args: object) -> None:
         self.close()
+
+    def _api_get_list(self, path: str) -> list[dict]:
+        token = (self.settings.real_debrid_api_token or "").strip()
+        if not token:
+            raise RealDebridError("REAL_DEBRID_API_TOKEN is not set")
+
+        base = self.settings.real_debrid_api_base.rstrip("/")
+        out: list[dict] = []
+        page = 1
+        while True:
+            try:
+                resp = self._client.get(
+                    f"{base}{path}",
+                    headers={"Authorization": f"Bearer {token}"},
+                    params={"page": page, "limit": _PAGE_LIMIT},
+                )
+            except httpx.HTTPError as exc:
+                raise RealDebridError(f"GET {path} failed: {exc}") from exc
+
+            if resp.status_code == 401:
+                raise RealDebridError("Real-Debrid API rejected the token (401)")
+            if resp.status_code == 403:
+                raise RealDebridError("Real-Debrid API forbidden (403)")
+            if not resp.is_success:
+                raise RealDebridError(f"GET {path} HTTP {resp.status_code}: {(resp.text or '')[:200]}")
+
+            if not resp.content:
+                break
+            try:
+                batch = resp.json()
+            except json.JSONDecodeError as exc:
+                raise RealDebridError(f"GET {path} returned non-JSON") from exc
+            if not isinstance(batch, list):
+                raise RealDebridError(f"GET {path} expected JSON array")
+            if not batch:
+                break
+            out.extend([x for x in batch if isinstance(x, dict)])
+            total = resp.headers.get("X-Total-Count")
+            if total is not None:
+                try:
+                    if len(out) >= int(total):
+                        break
+                except ValueError:
+                    pass
+            if len(batch) < _PAGE_LIMIT:
+                break
+            page += 1
+            time.sleep(0.15)
+        return out
+
+    def list_torrents(self) -> list[dict]:
+        return self._api_get_list("/torrents")
+
+    def torrent_info(self, torrent_id: str) -> dict:
+        token = (self.settings.real_debrid_api_token or "").strip()
+        if not token:
+            raise RealDebridError("REAL_DEBRID_API_TOKEN is not set")
+        base = self.settings.real_debrid_api_base.rstrip("/")
+        try:
+            resp = self._client.get(
+                f"{base}/torrents/info/{torrent_id}",
+                headers={"Authorization": f"Bearer {token}"},
+            )
+        except httpx.HTTPError:
+            return {}
+        if not resp.is_success or not resp.content:
+            return {}
+        try:
+            data = resp.json()
+        except json.JSONDecodeError:
+            return {}
+        return data if isinstance(data, dict) else {}
 
     def unrestrict_link(self, link: str) -> dict:
         token = (self.settings.real_debrid_api_token or "").strip()
