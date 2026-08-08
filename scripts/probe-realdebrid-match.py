@@ -2,18 +2,15 @@
 """
 Probe Real-Debrid downloads + torrents for filename matches against migradora jobs.
 
-Usage (on VPS, from repo root):
+Usage (on VPS host — recommended; container often lacks outbound API access):
   export REAL_DEBRID_API_TOKEN=your_token
-  python3 scripts/probe-realdebrid-match.py
+  ./scripts/probe-realdebrid-match.sh
 
-  # Or inside the orchestrator container (reads queue.db automatically):
-  docker compose exec -T orchestrator python /app/scripts/probe-realdebrid-match.py
+  # Hunt one file:
+  ./scripts/probe-realdebrid-match.sh --search 'VRCONK_barbie_a_porn_parody_8K_180x180_3dh.mp4'
 
-  # Optional: match against a text file (one filename per line) instead of queue.db:
-  python3 scripts/probe-realdebrid-match.py --filenames /path/to/filenames.txt
-
-  # Skip per-torrent info calls (faster; only torrent list name + downloads):
-  python3 scripts/probe-realdebrid-match.py --no-torrent-info
+  # Force running inside orchestrator container:
+  PROBE_RD_IN_CONTAINER=1 ./scripts/probe-realdebrid-match.sh
 """
 
 from __future__ import annotations
@@ -22,11 +19,13 @@ import argparse
 import json
 import os
 import re
+import socket
 import sqlite3
 import sys
 import time
 import unicodedata
 from pathlib import Path
+from typing import Any
 
 import httpx
 
@@ -44,6 +43,18 @@ def die(msg: str, code: int = 1) -> None:
     sys.exit(code)
 
 
+def enable_ipv4_only() -> None:
+    """Prefer IPv4 — many VPS containers have broken IPv6 routes to RD API."""
+    if os.environ.get("PROBE_RD_IPV4", "1").strip().lower() in ("0", "false", "no"):
+        return
+    _orig = socket.getaddrinfo
+
+    def _ipv4(host: str, port: Any, family: int = 0, type: int = 0, proto: int = 0, flags: int = 0):
+        return _orig(host, port, socket.AF_INET, type, proto, flags)
+
+    socket.getaddrinfo = _ipv4  # type: ignore[method-assign]
+
+
 def norm_name(name: str) -> str:
     """Case-insensitive match key; strip path and normalize unicode."""
     base = name.replace("\\", "/").rsplit("/", 1)[-1]
@@ -56,6 +67,7 @@ class RDClient:
     def __init__(self) -> None:
         if not TOKEN:
             die("Set REAL_DEBRID_API_TOKEN in the environment")
+        enable_ipv4_only()
         self._client = httpx.Client(
             base_url=API_BASE,
             headers={"Authorization": f"Bearer {TOKEN}"},
@@ -66,20 +78,44 @@ class RDClient:
     def close(self) -> None:
         self._client.close()
 
+    def _parse_list_response(self, path: str, resp: httpx.Response) -> list[dict]:
+        if resp.status_code == 401:
+            die("API token rejected (401)")
+        if resp.status_code == 403:
+            die("API forbidden (403) — check account status")
+        if not resp.is_success:
+            body = (resp.text or "").strip()[:300]
+            die(f"GET {path} failed: HTTP {resp.status_code} {body}")
+
+        if not resp.content:
+            return []
+
+        try:
+            data = resp.json()
+        except json.JSONDecodeError:
+            body = (resp.text or "").strip()[:300]
+            die(f"GET {path} returned non-JSON (HTTP {resp.status_code}): {body}")
+
+        if data is None:
+            return []
+        if isinstance(data, list):
+            return [x for x in data if isinstance(x, dict)]
+        die(f"GET {path} expected JSON array, got {type(data).__name__}")
+
     def _get_list(self, path: str) -> list[dict]:
         out: list[dict] = []
         page = 1
         while True:
-            resp = self._client.get(path, params={"page": page, "limit": PAGE_LIMIT})
-            if resp.status_code == 401:
-                die("API token rejected (401)")
-            if resp.status_code == 403:
-                die("API forbidden (403) — check account status")
-            if not resp.is_success:
-                die(f"GET {path} failed: HTTP {resp.status_code} {resp.text[:200]}")
-            batch = resp.json()
-            if not isinstance(batch, list):
-                die(f"Unexpected JSON from {path}")
+            try:
+                resp = self._client.get(path, params={"page": page, "limit": PAGE_LIMIT})
+            except httpx.HTTPError as exc:
+                die(
+                    f"GET {path} network error: {exc}\n"
+                    "  Try from the VPS host (not docker): ./scripts/probe-realdebrid-match.sh\n"
+                    "  Or: curl -4 -s -o /dev/null -w '%{http_code}' "
+                    f"-H 'Authorization: Bearer $REAL_DEBRID_API_TOKEN' {API_BASE}/user"
+                )
+            batch = self._parse_list_response(path, resp)
             if not batch:
                 break
             out.extend(batch)
@@ -103,10 +139,16 @@ class RDClient:
         return self._get_list("/torrents")
 
     def torrent_info(self, torrent_id: str) -> dict:
-        resp = self._client.get(f"/torrents/info/{torrent_id}")
-        if not resp.is_success:
+        try:
+            resp = self._client.get(f"/torrents/info/{torrent_id}")
+        except httpx.HTTPError:
             return {}
-        data = resp.json()
+        if not resp.is_success or not resp.content:
+            return {}
+        try:
+            data = resp.json()
+        except json.JSONDecodeError:
+            return {}
         return data if isinstance(data, dict) else {}
 
 
@@ -130,7 +172,11 @@ def load_queue_filenames(db_path: Path) -> list[dict]:
 
 def load_filename_list(path: Path) -> list[dict]:
     names = [line.strip() for line in path.read_text(encoding="utf-8").splitlines()]
-    return [{"id": i + 1, "filename": n, "parent_folder_path": "", "status": "?"} for i, n in enumerate(names) if n]
+    return [
+        {"id": i + 1, "filename": n, "parent_folder_path": "", "status": "?"}
+        for i, n in enumerate(names)
+        if n
+    ]
 
 
 def add_entry(
@@ -152,50 +198,58 @@ def build_indexes(
     rd: RDClient,
     *,
     torrent_info: bool,
+    use_downloads: bool,
+    use_torrents: bool,
 ) -> tuple[dict[str, list[dict]], dict[str, list[dict]], dict[str, list[dict]]]:
     """Returns (downloads_by_name, torrent_name_by_name, torrent_file_by_name)."""
     downloads_by: dict[str, list[dict]] = {}
     torrent_name_by: dict[str, list[dict]] = {}
     torrent_file_by: dict[str, list[dict]] = {}
 
-    print("Fetching GET /downloads …")
-    downloads = rd.list_downloads()
-    print(f"  {len(downloads)} download history entries")
+    if use_downloads:
+        print("Fetching GET /downloads …")
+        downloads = rd.list_downloads()
+        print(f"  {len(downloads)} download history entries")
+        for item in downloads:
+            fn = (item.get("filename") or "").strip()
+            key = norm_name(fn)
+            link = (item.get("download") or item.get("link") or "").strip()
+            add_entry(
+                downloads_by,
+                key,
+                "downloads",
+                fn,
+                link,
+                extra=f"{item.get('filesize', 0)} B",
+            )
+    else:
+        print("Skipping GET /downloads")
 
-    for item in downloads:
-        fn = (item.get("filename") or "").strip()
-        key = norm_name(fn)
-        link = (item.get("download") or item.get("link") or "").strip()
-        add_entry(
-            downloads_by,
-            key,
-            "downloads",
-            fn,
-            link,
-            extra=f"{item.get('filesize', 0)} B",
-        )
+    downloaded: list[dict] = []
+    if use_torrents:
+        print("Fetching GET /torrents …")
+        torrents = rd.list_torrents()
+        print(f"  {len(torrents)} torrent list entries")
 
-    print("Fetching GET /torrents …")
-    torrents = rd.list_torrents()
-    print(f"  {len(torrents)} torrent list entries")
+        downloaded = [t for t in torrents if (t.get("status") or "") == "downloaded"]
+        print(f"  {len(downloaded)} with status=downloaded")
 
-    downloaded = [t for t in torrents if (t.get("status") or "") == "downloaded"]
-    print(f"  {len(downloaded)} with status=downloaded")
-
-    for t in torrents:
-        tid = (t.get("id") or "").strip()
-        tname = (t.get("filename") or "").strip()
-        key = norm_name(tname)
-        links = t.get("links") or []
-        link = links[0] if links else ""
-        add_entry(
-            torrent_name_by,
-            key,
-            "torrents.name",
-            tname,
-            link,
-            extra=f"id={tid} status={t.get('status')}",
-        )
+        for t in torrents:
+            tid = (t.get("id") or "").strip()
+            tname = (t.get("filename") or "").strip()
+            key = norm_name(tname)
+            links = t.get("links") or []
+            link = links[0] if links else ""
+            add_entry(
+                torrent_name_by,
+                key,
+                "torrents.name",
+                tname,
+                link,
+                extra=f"id={tid} status={t.get('status')}",
+            )
+    else:
+        print("Skipping GET /torrents")
 
     if torrent_info and downloaded:
         print(f"Fetching GET /torrents/info/{{id}} for {len(downloaded)} downloaded torrents …")
@@ -233,9 +287,55 @@ def build_indexes(
 def pick_best(matches: list[dict]) -> dict | None:
     if not matches:
         return None
-    # Prefer entries that already have a link
     with_link = [m for m in matches if m.get("link")]
     return with_link[0] if with_link else matches[0]
+
+
+def collect_substring_matches(
+    query: str,
+    downloads_by: dict[str, list[dict]],
+    torrent_name_by: dict[str, list[dict]],
+    torrent_file_by: dict[str, list[dict]],
+) -> list[dict]:
+    q = norm_name(query)
+    if not q:
+        return []
+
+    hits: list[dict] = []
+    seen: set[tuple[str, str, str]] = set()
+
+    def scan(store: dict[str, list[dict]], source_label: str) -> None:
+        for key, entries in store.items():
+            if q == key or q in key or key in q:
+                for entry in entries:
+                    sig = (source_label, entry.get("label", ""), entry.get("link", ""))
+                    if sig in seen:
+                        continue
+                    seen.add(sig)
+                    hits.append({**entry, "match_key": key, "source_label": source_label})
+
+    scan(downloads_by, "downloads")
+    scan(torrent_name_by, "torrents.name")
+    scan(torrent_file_by, "torrents.file")
+    return hits
+
+
+def print_search_results(query: str, hits: list[dict]) -> None:
+    print()
+    print("=" * 60)
+    print(f"SEARCH: {query}")
+    print(f"Normalized: {norm_name(query)}")
+    print("=" * 60)
+    if not hits:
+        print("No matches (exact or substring) in indexed RD data.")
+        return
+    print(f"Found {len(hits)} match(es):")
+    for i, hit in enumerate(hits, 1):
+        link = hit.get("link") or "(no link)"
+        print(f"\n[{i}] {hit.get('source_label')} — {hit.get('label')}")
+        if hit.get("extra"):
+            print(f"     {hit['extra']}")
+        print(f"     link: {link}")
 
 
 def report(
@@ -340,9 +440,24 @@ def main() -> None:
         help="Text file with one filename per line (instead of queue.db)",
     )
     parser.add_argument(
+        "--search",
+        metavar="FILENAME",
+        help="Search RD indexes for this filename (exact + substring); skips queue report",
+    )
+    parser.add_argument(
         "--no-torrent-info",
         action="store_true",
         help="Skip GET /torrents/info (faster; no torrent file path matching)",
+    )
+    parser.add_argument(
+        "--no-downloads",
+        action="store_true",
+        help="Skip GET /downloads (use torrent list only)",
+    )
+    parser.add_argument(
+        "--torrents-only",
+        action="store_true",
+        help="Only fetch GET /torrents (skip downloads history)",
     )
     parser.add_argument(
         "--samples",
@@ -357,35 +472,54 @@ def main() -> None:
     )
     args = parser.parse_args()
 
-    if args.filenames:
-        jobs = load_filename_list(args.filenames)
-        print(f"Loaded {len(jobs)} filenames from {args.filenames}")
-    else:
-        db_path = Path(args.db)
-        jobs = load_queue_filenames(db_path)
-        if jobs:
-            print(f"Loaded {len(jobs)} failed/pending jobs from {db_path}")
+    use_downloads = not args.no_downloads and not args.torrents_only
+    use_torrents = True
+
+    jobs: list[dict] = []
+    if not args.search:
+        if args.filenames:
+            jobs = load_filename_list(args.filenames)
+            print(f"Loaded {len(jobs)} filenames from {args.filenames}")
         else:
-            print(f"No failed/pending jobs in {db_path} — pass --filenames or fix --db")
+            db_path = Path(args.db)
+            jobs = load_queue_filenames(db_path)
+            if jobs:
+                print(f"Loaded {len(jobs)} failed/pending jobs from {db_path}")
+            else:
+                print(f"No failed/pending jobs in {db_path} — pass --filenames or fix --db")
 
     rd = RDClient()
     try:
         downloads_by, torrent_name_by, torrent_file_by = build_indexes(
             rd,
             torrent_info=not args.no_torrent_info,
+            use_downloads=use_downloads,
+            use_torrents=use_torrents,
         )
     finally:
         rd.close()
 
+    if args.search:
+        hits = collect_substring_matches(
+            args.search,
+            downloads_by,
+            torrent_name_by,
+            torrent_file_by,
+        )
+        print_search_results(args.search, hits)
+        return
+
     if args.json:
-        print(json.dumps(
-            {
-                "downloads": downloads_by,
-                "torrent_names": torrent_name_by,
-                "torrent_files": torrent_file_by,
-            },
-            indent=2,
-        ))
+        print(
+            json.dumps(
+                {
+                    "downloads": downloads_by,
+                    "torrent_names": torrent_name_by,
+                    "torrent_files": torrent_file_by,
+                },
+                indent=2,
+            )
+        )
         return
 
     report(
