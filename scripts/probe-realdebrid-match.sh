@@ -31,10 +31,10 @@ run_container() {
 }
 
 if [ "${PROBE_RD_IN_CONTAINER:-}" = "1" ]; then
-  run_container
+  run_container "$@"
 elif docker compose ps orchestrator 2>/dev/null | grep -q Up; then
   # Default: host (reads ./data/state/queue.db, uses host network)
-  run_host
+  run_host "$@"
 else
-  run_host
+  run_host "$@"
 fi
