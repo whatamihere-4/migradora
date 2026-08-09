@@ -192,15 +192,24 @@ def create_app(settings: Settings, orchestrator: Orchestrator) -> FastAPI:
             None,
             description="Filter by gofile_path or parent_folder_path prefix (e.g. SLR)",
         ),
+        realdebrid: bool = Query(
+            False,
+            description="Only jobs with a Real-Debrid download link",
+        ),
         limit: int = Query(500, ge=1, le=2000),
         offset: int = Query(0, ge=0),
     ) -> dict[str, Any]:
-        total = queue.count_files(status=status, path_prefix=path)
+        total = queue.count_files(
+            status=status,
+            path_prefix=path,
+            realdebrid_only=realdebrid,
+        )
         records = queue.list_files(
             status=status,
             limit=limit,
             offset=offset,
             path_prefix=path,
+            realdebrid_only=realdebrid,
         )
         jobs = []
         for record in records:

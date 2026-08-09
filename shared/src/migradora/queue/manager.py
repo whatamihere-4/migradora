@@ -10,7 +10,7 @@ from typing import Any, Iterator
 
 from migradora.db import init_db, row_to_dict
 from migradora.models import FileRecord, FileStatus, QueueState, QueueStats, utc_now
-from migradora.realdebrid_client import is_realdebrid_url
+from migradora.realdebrid_client import is_realdebrid_url, realdebrid_jobs_sql_clause
 
 
 class QueueManager:
@@ -447,6 +447,7 @@ class QueueManager:
         self,
         status: str | None = None,
         path_prefix: str | None = None,
+        realdebrid_only: bool = False,
     ) -> int:
         clauses = ["is_part = 0"]
         values: list[Any] = []
@@ -461,6 +462,8 @@ class QueueManager:
                     "(gofile_path LIKE ? OR parent_folder_path LIKE ?)"
                 )
                 values.extend([like, like])
+        if realdebrid_only:
+            clauses.append(realdebrid_jobs_sql_clause())
         where = " AND ".join(clauses)
         with self.connection() as conn:
             row = conn.execute(
@@ -475,6 +478,7 @@ class QueueManager:
         limit: int = 100,
         offset: int = 0,
         path_prefix: str | None = None,
+        realdebrid_only: bool = False,
     ) -> list[FileRecord]:
         clauses = ["is_part = 0"]
         values: list[Any] = []
@@ -489,6 +493,8 @@ class QueueManager:
                     "(gofile_path LIKE ? OR parent_folder_path LIKE ?)"
                 )
                 values.extend([like, like])
+        if realdebrid_only:
+            clauses.append(realdebrid_jobs_sql_clause())
         where = " AND ".join(clauses)
         values.extend([limit, offset])
         with self.connection() as conn:

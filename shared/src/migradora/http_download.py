@@ -3,13 +3,32 @@
 from __future__ import annotations
 
 import logging
-import time
 from pathlib import Path
 from typing import Callable
 
 import httpx
 
+from migradora.interrupt import interruptible_sleep
+
 logger = logging.getLogger("migradora.http_download")
+
+
+def _content_length(resp: httpx.Response, fallback: int | None = None) -> int | None:
+    raw = resp.headers.get("content-length")
+    if raw:
+        try:
+            return int(raw)
+        except ValueError:
+            pass
+    content_range = resp.headers.get("content-range")
+    if content_range and "/" in content_range:
+        total = content_range.rsplit("/", 1)[-1].strip()
+        if total != "*":
+            try:
+                return int(total)
+            except ValueError:
+                pass
+    return fallback
 
 
 def download_url(
@@ -20,6 +39,7 @@ def download_url(
     expected_size: int | None = None,
     throttle_kbps: int = 0,
     on_progress: Callable[[int, int | None], None] | None = None,
+    skip_check: Callable[[], None] | None = None,
 ) -> str:
     """Download with resume support (.part temp file)."""
     dest = Path(dest_path)
@@ -36,6 +56,8 @@ def download_url(
         logger.info("Resuming download at byte %d -> %s", offset, part.stem)
     mode = "ab" if offset else "wb"
 
+    if skip_check:
+        skip_check()
     with client.stream("GET", url, headers=headers, follow_redirects=True) as resp:
         if resp.status_code == 416:
             if expected_size and offset == expected_size:
@@ -43,13 +65,21 @@ def download_url(
             raise RuntimeError(f"Download range not satisfiable at offset {offset}")
         if resp.status_code not in (200, 206):
             resp.raise_for_status()
+        total_bytes = expected_size or _content_length(resp)
+        if on_progress:
+            on_progress(offset, total_bytes)
         with part.open(mode) as fh:
             for chunk in resp.iter_bytes(chunk_size=1024 * 1024):
+                if skip_check:
+                    skip_check()
                 fh.write(chunk)
                 if on_progress:
-                    on_progress(part.stat().st_size, expected_size)
+                    on_progress(part.stat().st_size, total_bytes)
                 if throttle_kbps > 0:
-                    time.sleep(len(chunk) / (throttle_kbps * 1024))
+                    interruptible_sleep(
+                        len(chunk) / (throttle_kbps * 1024),
+                        skip_check=skip_check,
+                    )
 
     part.rename(dest)
     size = dest.stat().st_size

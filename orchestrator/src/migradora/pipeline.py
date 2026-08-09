@@ -476,10 +476,29 @@ class PipelineCoordinator:
             def job_log(line: str) -> None:
                 self._append_job_log(job.id, line)
 
+            def skip_check() -> None:
+                self._check_skip(job.id)
+
             if rd_url:
                 self._append_job_log(job.id, f"[RD] Download via Real-Debrid: {job.filename}")
+                skip_check()
                 with RealDebridClient(self.settings) as rd:
-                    direct = rd.resolve_download_url(rd_url, on_log=job_log)
+                    meta = rd.resolve_metadata(
+                        rd_url,
+                        on_log=job_log,
+                        skip_check=skip_check,
+                    )
+                direct = (meta.get("download_url") or "").strip()
+                if not direct:
+                    raise RuntimeError("Real-Debrid returned no download URL")
+                rd_size = int(meta.get("filesize") or 0)
+                expected_size = job.size_bytes or rd_size or None
+                if rd_size and not job.size_bytes:
+                    self._progress_total = rd_size
+                    self.queue.update_file(job.id, size_bytes=rd_size)
+                elif expected_size:
+                    self._progress_total = expected_size
+                skip_check()
                 timeout = httpx.Timeout(
                     connect=self.settings.real_debrid_connect_timeout_sec,
                     read=self.settings.real_debrid_read_timeout_sec,
@@ -492,12 +511,14 @@ class PipelineCoordinator:
                         http,
                         direct,
                         dest,
-                        expected_size=job.size_bytes or None,
+                        expected_size=expected_size,
                         throttle_kbps=self.settings.download_throttle_kbps,
                         on_progress=on_download_progress,
+                        skip_check=skip_check,
                     )
                 local_path = dest
             else:
+                skip_check()
                 with GofileClient(
                     token=self.settings.gofile_token,
                     password=self.settings.gofile_password,
@@ -512,6 +533,7 @@ class PipelineCoordinator:
                         expected_size=job.size_bytes or None,
                         throttle_kbps=self.settings.download_throttle_kbps,
                         on_progress=on_download_progress,
+                        skip_check=skip_check,
                     )
                 local_path = dest
             self._transfer.complete_phase("download", local_path.stat().st_size)

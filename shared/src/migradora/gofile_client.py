@@ -366,12 +366,15 @@ class GofileClient:
         expected_size: int | None,
         throttle_kbps: int,
         on_progress: Callable[[int, int | None], None] | None,
+        skip_check: Callable[[], None] | None = None,
     ) -> None:
         headers: dict[str, str] = {}
         if offset:
             headers["Range"] = f"bytes={offset}-"
             logger.info("Resuming download at byte %d -> %s", offset, part.stem)
         mode = "ab" if offset else "wb"
+        if skip_check:
+            skip_check()
         with self._client.stream("GET", url, headers=headers, follow_redirects=True) as resp:
             if resp.status_code == 416:
                 if expected_size and offset == expected_size:
@@ -381,6 +384,8 @@ class GofileClient:
                 resp.raise_for_status()
             with part.open(mode) as fh:
                 for chunk in resp.iter_bytes(chunk_size=1024 * 1024):
+                    if skip_check:
+                        skip_check()
                     fh.write(chunk)
                     if on_progress:
                         on_progress(part.stat().st_size, expected_size)
@@ -395,6 +400,7 @@ class GofileClient:
         *,
         connections: int,
         on_progress: Callable[[int, int | None], None] | None,
+        skip_check: Callable[[], None] | None = None,
     ) -> None:
         connections = min(connections, total_size)
         chunk = (total_size + connections - 1) // connections
@@ -411,6 +417,8 @@ class GofileClient:
         range_done = [0] * len(ranges)
 
         def fetch_range(span: tuple[int, int], range_index: int) -> Path:
+            if skip_check:
+                skip_check()
             start, end = span
             span_bytes = end - start + 1
             temp = part.with_suffix(f"{part.suffix}.{start}")
@@ -422,6 +430,8 @@ class GofileClient:
                     resp.raise_for_status()
                 with temp.open("wb") as fh:
                     for chunk in resp.iter_bytes(chunk_size=1024 * 1024):
+                        if skip_check:
+                            skip_check()
                         fh.write(chunk)
                         if on_progress:
                             with progress_lock:
@@ -457,8 +467,11 @@ class GofileClient:
         expected_size: int | None = None,
         throttle_kbps: int = 0,
         on_progress: Callable[[int, int | None], None] | None = None,
+        skip_check: Callable[[], None] | None = None,
     ) -> str:
         """Download with resume support (.part file)."""
+        if skip_check:
+            skip_check()
         direct = self.resolve_direct_link(gofile_url)
         dest = Path(dest_path)
         dest.parent.mkdir(parents=True, exist_ok=True)
@@ -487,6 +500,7 @@ class GofileClient:
                 expected_size,
                 connections=self.download_connections,
                 on_progress=on_progress,
+                skip_check=skip_check,
             )
         else:
             self._download_single_stream(
@@ -496,6 +510,7 @@ class GofileClient:
                 expected_size=expected_size,
                 throttle_kbps=throttle_kbps,
                 on_progress=on_progress,
+                skip_check=skip_check,
             )
 
         part.rename(dest)

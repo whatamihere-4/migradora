@@ -12,6 +12,7 @@ from urllib.parse import urlparse, urlunparse
 import httpx
 
 from migradora.config import Settings
+from migradora.interrupt import interruptible_sleep
 
 _PAGE_LIMIT = 5000
 
@@ -53,6 +54,15 @@ def is_realdebrid_url(url: str | None) -> bool:
     if not raw:
         return False
     return is_panel_link(raw) or is_cdn_link(raw)
+
+
+def realdebrid_jobs_sql_clause() -> str:
+    """SQL WHERE fragment: job has a Real-Debrid panel or CDN URL on download_link or gofile_url."""
+    link_match = (
+        "(download_link LIKE '%real-debrid.%' OR download_link LIKE '%rdeb.io%'"
+        " OR gofile_url LIKE '%real-debrid.%' OR gofile_url LIKE '%rdeb.io%')"
+    )
+    return link_match
 
 
 def needs_resolution(url: str) -> bool:
@@ -210,7 +220,11 @@ class RealDebridClient:
             return {}
         return data if isinstance(data, dict) else {}
 
-    def unrestrict_link(self, link: str) -> dict:
+    def unrestrict_link(
+        self,
+        link: str,
+        skip_check: Callable[[], None] | None = None,
+    ) -> dict:
         token = (self.settings.real_debrid_api_token or "").strip()
         if not token:
             raise RealDebridError("REAL_DEBRID_API_TOKEN is not set")
@@ -235,7 +249,7 @@ class RealDebridClient:
             except httpx.HTTPError as exc:
                 if attempt + 1 >= max_retries:
                     raise RealDebridError(f"Real-Debrid API request failed: {exc}") from exc
-                time.sleep(retry_delay * (attempt + 1))
+                interruptible_sleep(retry_delay * (attempt + 1), skip_check=skip_check)
                 continue
 
             if resp.status_code == 401:
@@ -254,7 +268,7 @@ class RealDebridClient:
                     wait = retry_delay * (attempt + 1)
                     if last_detail == "hoster_unavailable":
                         wait = max(wait, 60)
-                    time.sleep(wait)
+                    interruptible_sleep(wait, skip_check=skip_check)
                     continue
             if not resp.is_success:
                 detail = last_detail
@@ -285,6 +299,7 @@ class RealDebridClient:
         url: str,
         *,
         on_log: Callable[[str], None] | None = None,
+        skip_check: Callable[[], None] | None = None,
     ) -> str:
         raw = (url or "").strip()
         if not raw:
@@ -301,7 +316,7 @@ class RealDebridClient:
                 return apply_preferred_cdn(raw, self.settings, on_log=on_log)
 
             _log(f"[RD] Resolving panel link via API: {raw}", on_log)
-            payload = self.unrestrict_link(raw)
+            payload = self.unrestrict_link(raw, skip_check=skip_check)
             download = (payload.get("download") or "").strip()
             if not download:
                 raise RealDebridError("Real-Debrid API returned no download URL")
@@ -314,14 +329,22 @@ class RealDebridClient:
 
         return apply_preferred_cdn(raw, self.settings, on_log=on_log)
 
-    def resolve_metadata(self, url: str) -> dict:
+    def resolve_metadata(
+        self,
+        url: str,
+        *,
+        on_log: Callable[[str], None] | None = None,
+        skip_check: Callable[[], None] | None = None,
+    ) -> dict:
         """Resolve link and return download URL plus filename/size when available."""
         raw = (url or "").strip()
         filename = ""
         filesize = 0
 
         if needs_resolution(raw):
-            payload = self.unrestrict_link(raw)
+            if skip_check:
+                skip_check()
+            payload = self.unrestrict_link(raw, skip_check=skip_check)
             download = (payload.get("download") or "").strip()
             if not download:
                 raise RealDebridError("Real-Debrid API returned no download URL")

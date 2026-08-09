@@ -100,6 +100,7 @@ class Orchestrator:
 
         if self.pipeline._current_job_id == job_id:
             self.pipeline.request_skip(job_id)
+            self.queue.mark_skipped(job_id)
             return {"status": "skip_requested", "job_id": job_id, "removed": []}
 
         try:
