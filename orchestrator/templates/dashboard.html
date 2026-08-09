@@ -446,6 +446,9 @@
         cur.status_text = currentJob.status_text || cur.status_text;
         cur.upload_progress = currentJob.upload_progress || cur.upload_progress;
         if (currentJob.status) cur.status = currentJob.status;
+        if (currentJob.filester_slug && currentJob.filester_slug.length) {
+          cur.filester_slug = currentJob.filester_slug;
+        }
         return jobs;
       }
       return [currentJob, ...jobs];
