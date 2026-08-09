@@ -675,6 +675,8 @@ class PipelineCoordinator:
                     ffprobe_bin=self.settings.ffprobe_bin,
                     mkvmerge_bin=self.settings.mkvmerge_bin,
                     ffmpeg_timeout=self.settings.ffmpeg_timeout_sec,
+                    ffprobe_keyframe_timeout=self.settings.ffprobe_keyframe_timeout_sec,
+                    extract_backend=self.settings.splitter_extract_backend,
                     skip_part_indices=skip_part_indices,
                     reuse_existing_parts=True,
                     on_log=job_log,

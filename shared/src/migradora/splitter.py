@@ -190,7 +190,9 @@ def iter_upload_parts(
     ffmpeg_bin: str = "ffmpeg",
     ffprobe_bin: str = "ffprobe",
     mkvmerge_bin: str = "mkvmerge",
-    ffmpeg_timeout: int = 7200,
+    ffmpeg_timeout: int = 1800,
+    ffprobe_keyframe_timeout: int = 300,
+    extract_backend: str = "ffmpeg",
     delete_source: bool = True,
     skip_part_indices: frozenset[int] = frozenset(),
     reuse_existing_parts: bool = False,
@@ -204,8 +206,8 @@ def iter_upload_parts(
     ``bytes`` (default): byte-range parts rejoined with ``cat``. Only one part
     exists on disk alongside the source at any moment.
 
-    ``ffmpeg_slice``: playable parts via mkvmerge time split + ffmpeg remux
-    (one part at a time; brief temp .mkv per part; more CPU than bytes mode).
+    ``ffmpeg_slice``: playable keyframe-aligned parts via ffmpeg stream copy
+    (one part at a time; same disk peak as bytes mode).
     """
     source = Path(source)
     output_dir = Path(output_dir)
@@ -224,6 +226,8 @@ def iter_upload_parts(
             ffprobe_bin=ffprobe_bin,
             mkvmerge_bin=mkvmerge_bin,
             ffmpeg_timeout=ffmpeg_timeout,
+            ffprobe_keyframe_timeout=ffprobe_keyframe_timeout,
+            extract_backend=extract_backend,
             skip_check=skip_check,
             delete_source=delete_source,
             skip_part_indices=skip_part_indices,

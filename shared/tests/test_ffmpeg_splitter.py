@@ -41,6 +41,19 @@ class KeyframeSplitPlanTests(unittest.TestCase):
 
 
 class SparseKeyframeHelperTests(unittest.TestCase):
+    def test_scaled_segment_timeout_caps_at_max(self) -> None:
+        from migradora.ffmpeg_splitter import _scaled_segment_timeout
+
+        # ~8 GiB segment of a 30 GiB file → bounded below 30 min default max
+        timeout = _scaled_segment_timeout(
+            segment_sec=1200.0,
+            file_size=30 * 1024**3,
+            duration=3600.0,
+            max_timeout=1800,
+        )
+        self.assertLessEqual(timeout, 1800)
+        self.assertGreaterEqual(timeout, 300)
+
     def test_format_read_interval_window(self) -> None:
         self.assertEqual(_format_read_interval(100.0, 200.0, 1000.0), "100.000%200.000")
 

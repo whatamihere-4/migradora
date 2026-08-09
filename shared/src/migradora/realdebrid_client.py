@@ -220,36 +220,65 @@ class RealDebridClient:
             data["remote"] = "1"
 
         base = self.settings.real_debrid_api_base.rstrip("/")
-        try:
-            resp = self._client.post(
-                f"{base}/unrestrict/link",
-                headers={"Authorization": f"Bearer {token}"},
-                data=data,
-            )
-        except httpx.HTTPError as exc:
-            raise RealDebridError(f"Real-Debrid API request failed: {exc}") from exc
+        max_retries = max(1, self.settings.real_debrid_api_max_retries)
+        retry_delay = max(5, self.settings.real_debrid_api_retry_delay_sec)
+        retriable = {429, 502, 503}
 
-        if resp.status_code == 401:
-            raise RealDebridError("Real-Debrid API rejected the token (401)")
-        if resp.status_code == 403:
-            raise RealDebridError("Real-Debrid API forbidden (403) — check account status")
-        if not resp.is_success:
-            detail = ""
+        last_detail = ""
+        for attempt in range(max_retries):
             try:
-                body = resp.json()
-                if isinstance(body, dict):
-                    detail = str(body.get("error") or "").strip()
-            except ValueError:
-                detail = (resp.text or "").strip()[:300]
-            msg = f"Real-Debrid API HTTP {resp.status_code}"
-            if detail:
-                msg = f"{msg}: {detail}"
-            raise RealDebridError(msg)
+                resp = self._client.post(
+                    f"{base}/unrestrict/link",
+                    headers={"Authorization": f"Bearer {token}"},
+                    data=data,
+                )
+            except httpx.HTTPError as exc:
+                if attempt + 1 >= max_retries:
+                    raise RealDebridError(f"Real-Debrid API request failed: {exc}") from exc
+                time.sleep(retry_delay * (attempt + 1))
+                continue
 
-        payload = resp.json()
-        if not isinstance(payload, dict):
-            raise RealDebridError("Real-Debrid API returned unexpected payload")
-        return payload
+            if resp.status_code == 401:
+                raise RealDebridError("Real-Debrid API rejected the token (401)")
+            if resp.status_code == 403:
+                raise RealDebridError("Real-Debrid API forbidden (403) — check account status")
+            if resp.status_code in retriable:
+                last_detail = ""
+                try:
+                    body = resp.json()
+                    if isinstance(body, dict):
+                        last_detail = str(body.get("error") or "").strip()
+                except ValueError:
+                    last_detail = (resp.text or "").strip()[:300]
+                if attempt + 1 < max_retries:
+                    wait = retry_delay * (attempt + 1)
+                    if last_detail == "hoster_unavailable":
+                        wait = max(wait, 60)
+                    time.sleep(wait)
+                    continue
+            if not resp.is_success:
+                detail = last_detail
+                if not detail:
+                    try:
+                        body = resp.json()
+                        if isinstance(body, dict):
+                            detail = str(body.get("error") or "").strip()
+                    except ValueError:
+                        detail = (resp.text or "").strip()[:300]
+                msg = f"Real-Debrid API HTTP {resp.status_code}"
+                if detail:
+                    msg = f"{msg}: {detail}"
+                raise RealDebridError(msg)
+
+            payload = resp.json()
+            if not isinstance(payload, dict):
+                raise RealDebridError("Real-Debrid API returned unexpected payload")
+            return payload
+
+        msg = "Real-Debrid API request failed after retries"
+        if last_detail:
+            msg = f"{msg}: {last_detail}"
+        raise RealDebridError(msg)
 
     def resolve_download_url(
         self,

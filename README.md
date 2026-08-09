@@ -134,7 +134,7 @@ Files over `FILESTER_MAX_FILE_BYTES` (~9.5 GiB) are split before upload. Set `FI
 | `bytes` (default) | `movie.mp4.part001`, … | source + one part | `cat movie.mp4.part* > movie.mp4` |
 | `ffmpeg_slice` | `movie.PART1.mp4`, … (playable) | source + one part | `ffmpeg -f concat -safe 0 -i list.txt -c copy movie.mp4` |
 
-`ffmpeg_slice` uses more CPU but keeps the same low disk footprint as `bytes` — useful on small VPS disks when you want independently playable parts. Splits are aligned to video keyframes so each part is playable on its own and parts rejoin cleanly with stream-copy concat (no re-encode).
+`ffmpeg_slice` uses more CPU than `bytes` but keeps the same low disk footprint — useful on small VPS disks when you want independently playable parts. Splits are aligned to video keyframes so each part is playable on its own and parts rejoin cleanly with stream-copy concat (no re-encode). Extraction uses ffmpeg input seek by default (`SPLITTER_EXTRACT_BACKEND=ffmpeg`); legacy `mkvmerge` fifo mode is much slower on large MP4s.
 
 Split uploads are placed in a Filester subfolder under the studio folder, named after the original video filename (e.g. `VR/Studio1/My Scene.mp4/` containing the parts). This is automatic when a file exceeds `FILESTER_MAX_FILE_BYTES` — no extra env var.
 

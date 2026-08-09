@@ -74,6 +74,8 @@ class Settings:
     real_debrid_remote: bool = False
     real_debrid_connect_timeout_sec: int = 15
     real_debrid_read_timeout_sec: int = 60
+    real_debrid_api_max_retries: int = 5
+    real_debrid_api_retry_delay_sec: int = 30
 
     # Filester
     filester_api_key: str = ""
@@ -88,7 +90,9 @@ class Settings:
     ffmpeg_bin: str = "ffmpeg"
     ffprobe_bin: str = "ffprobe"
     mkvmerge_bin: str = "mkvmerge"
-    ffmpeg_timeout_sec: int = 7200
+    ffmpeg_timeout_sec: int = 1800
+    ffprobe_keyframe_timeout_sec: int = 300
+    splitter_extract_backend: str = "ffmpeg"
 
     # Paths
     download_dir: str = "/data/downloads"
@@ -173,6 +177,12 @@ class Settings:
                 5, _env_int("REAL_DEBRID_CONNECT_TIMEOUT_SEC", 15)
             ),
             real_debrid_read_timeout_sec=max(30, _env_int("REAL_DEBRID_READ_TIMEOUT_SEC", 60)),
+            real_debrid_api_max_retries=max(
+                1, _env_int("REAL_DEBRID_API_MAX_RETRIES", 5)
+            ),
+            real_debrid_api_retry_delay_sec=max(
+                5, _env_int("REAL_DEBRID_API_RETRY_DELAY_SEC", 30)
+            ),
             filester_api_key=_env("FILESTER_API_KEY"),
             filester_api_base=_env("FILESTER_API_BASE", "https://u1.filester.me").rstrip("/"),
             filester_root_folder_name=_env("FILESTER_ROOT_FOLDER_NAME"),
@@ -185,7 +195,14 @@ class Settings:
             ffmpeg_bin=_env("FFMPEG_BIN", "ffmpeg"),
             ffprobe_bin=_env("FFPROBE_BIN", "ffprobe"),
             mkvmerge_bin=_env("MKVMERGE_BIN", "mkvmerge"),
-            ffmpeg_timeout_sec=_env_int("SPLITTER_FFMPEG_TIMEOUT_SEC", 7200),
+            ffmpeg_timeout_sec=max(
+                300, _env_int("SPLITTER_FFMPEG_TIMEOUT_SEC", 1800)
+            ),
+            ffprobe_keyframe_timeout_sec=max(
+                60, _env_int("SPLITTER_FFPROBE_TIMEOUT_SEC", 300)
+            ),
+            splitter_extract_backend=_env("SPLITTER_EXTRACT_BACKEND", "ffmpeg").lower()
+            or "ffmpeg",
             download_dir=_env("DOWNLOAD_DIR", "/data/downloads"),
             state_dir=state_dir,
             log_dir=_env("LOG_DIR", "/data/logs"),
