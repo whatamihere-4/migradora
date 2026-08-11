@@ -32,6 +32,41 @@ class UploadProgressReporter:
         if status_text:
             self._status_text = status_text
 
+    def set_part_verifying(self, part_index: int, part_count: int, label: str) -> None:
+        """Show post-upload verification while Filester finalizes the part."""
+        idx = int(part_index or 0)
+        n = int(part_count or 0)
+        if idx <= 0:
+            return
+        self._current_part = idx
+        rec = self._parts.get(idx)
+        label_text = label or (rec["label"] if rec else f"Part {idx}")
+        status = f"Verifying part {idx}/{n} on Filester: {label_text}"
+        overall = self._overall_bytes()
+        total_all = self._total_bytes()
+        overall_pct = (overall / total_all * 100.0) if total_all > 0 else 0.0
+        self._commit(
+            {
+                "type": "upload",
+                "phase": "uploading",
+                "mode": "split",
+                "percent": round(overall_pct, 1),
+                "uploaded": overall,
+                "total": total_all,
+                "uploaded_fmt": format_size(overall),
+                "total_fmt": format_size(total_all),
+                "speed_fmt": "",
+                "speed": 0,
+                "eta": 0,
+                "folder_name": self._folder_name,
+                "part_index": idx,
+                "part_count": n,
+                "current_part": idx,
+                "parts": self._parts_payload(),
+            },
+            status,
+        )
+
     def set_splitting(self, *, source_bytes: int = 0, label: str = "") -> None:
         self._split_mode = True
         self._source_bytes = int(source_bytes or 0)

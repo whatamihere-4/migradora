@@ -218,6 +218,140 @@ class CreateFolderConflictTests(unittest.TestCase):
         )
 
 
+class VerifyUploadTests(unittest.TestCase):
+    def setUp(self) -> None:
+        self.client = FilesterClient(
+            "test-key",
+            verify_upload_max_wait_sec=10,
+            verify_upload_poll_sec=0.01,
+            verify_upload_request_timeout_sec=5,
+        )
+
+    def tearDown(self) -> None:
+        self.client.close()
+
+    def test_verify_waits_until_file_visible(self) -> None:
+        responses = [
+            {"error": "Database error"},
+            {"data": {"size": 0}},
+            {"data": {"size": 1000, "slug": "slug1"}},
+        ]
+        with patch.object(self.client, "_api_request_once", side_effect=responses) as req:
+            ok = self.client.verify_upload("slug1", 1000)
+        self.assertTrue(ok)
+        self.assertGreaterEqual(req.call_count, 2)
+
+    def test_verify_fails_on_terminal_status(self) -> None:
+        with patch.object(
+            self.client,
+            "_api_request_once",
+            return_value={"status": "failed"},
+        ):
+            ok = self.client.verify_upload("slug1", 1000)
+        self.assertFalse(ok)
+
+    def test_verify_uses_file_api_when_status_errors(self) -> None:
+        with patch.object(
+            self.client,
+            "_api_request_once",
+            side_effect=[
+                {"error": "Database error"},
+                {"data": {"size": 1000, "slug": "slug1"}},
+            ],
+        ) as req:
+            ok = self.client.verify_upload("slug1", 1000)
+        self.assertTrue(ok)
+        self.assertEqual(req.call_count, 2)
+
+    def test_verify_fails_on_size_mismatch_when_strict(self) -> None:
+        strict = FilesterClient("test-key", verify_upload_strict=True)
+        try:
+            with patch.object(
+                strict,
+                "_api_request_once",
+                side_effect=[
+                    {"status": "completed"},
+                    {"data": {"size": 500}},
+                ],
+            ):
+                ok = strict.verify_upload("slug1", 1000)
+            self.assertFalse(ok)
+        finally:
+            strict.close()
+
+    def test_verify_trusts_upload_on_timeout_by_default(self) -> None:
+        with patch.object(
+            self.client,
+            "_api_request_once",
+            side_effect=httpx.ReadTimeout("slow"),
+        ):
+            ok = self.client.verify_upload("slug1", 1000)
+        self.assertTrue(ok)
+
+    def test_verify_skipped_when_disabled(self) -> None:
+        disabled = FilesterClient("test-key", verify_upload_enabled=False)
+        try:
+            with patch.object(disabled, "_api_request_once") as req:
+                ok = disabled.verify_upload("slug1", 1000)
+            self.assertTrue(ok)
+            req.assert_not_called()
+        finally:
+            disabled.close()
+
+
+class UploadRetryDuplicateTests(unittest.TestCase):
+    def setUp(self) -> None:
+        self.client = FilesterClient("test-key", max_retries=3, retry_delay=0)
+
+    def tearDown(self) -> None:
+        self.client.close()
+
+    def test_no_retry_after_full_upload_when_response_lost(self) -> None:
+        import tempfile
+        from pathlib import Path
+
+        with tempfile.NamedTemporaryFile(delete=False) as tmp:
+            tmp.write(b"hello")
+            path = Path(tmp.name)
+        try:
+            post = MagicMock(side_effect=httpx.ReadTimeout("slow response"))
+            with patch.object(self.client._client, "post", post):
+                with patch.object(
+                    self.client,
+                    "_recover_upload_response",
+                    return_value=None,
+                ):
+                    with self.assertRaises(RuntimeError) as ctx:
+                        self.client.upload_file(path, folder_id="folder-1")
+            self.assertIn("duplicate", str(ctx.exception).lower())
+            self.assertEqual(post.call_count, 1)
+        finally:
+            path.unlink(missing_ok=True)
+
+    def test_recovers_slug_after_response_lost(self) -> None:
+        import tempfile
+        from pathlib import Path
+
+        with tempfile.NamedTemporaryFile(delete=False) as tmp:
+            tmp.write(b"hello")
+            path = Path(tmp.name)
+        try:
+            with patch.object(
+                self.client._client,
+                "post",
+                side_effect=httpx.ReadTimeout("slow"),
+            ):
+                with patch.object(
+                    self.client,
+                    "_recover_upload_response",
+                    return_value={"slug": "recovered"},
+                ):
+                    result = self.client.upload_file(path, folder_id="folder-1")
+            self.assertEqual(result.get("slug"), "recovered")
+        finally:
+            path.unlink(missing_ok=True)
+
+
 class UploadFolderThumbnailTests(unittest.TestCase):
     def setUp(self) -> None:
         self.client = FilesterClient("test-key")

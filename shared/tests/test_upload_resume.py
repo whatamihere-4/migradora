@@ -50,6 +50,23 @@ class UploadResumeStateTests(unittest.TestCase):
         self.assertEqual(loaded.skip_part_indices(), frozenset({1}))
         self.assertFalse(loaded.upload_complete())
 
+    def test_append_part_if_new(self) -> None:
+        state = UploadResumeState(total_parts=2)
+        part = UploadedPart(1, "a.part001", 100, "slug-a")
+        self.assertTrue(state.append_part_if_new(part))
+        self.assertFalse(state.append_part_if_new(
+            UploadedPart(1, "a.part001", 100, "slug-other"),
+        ))
+        self.assertEqual(len(state.parts), 1)
+        self.assertEqual(state.parts[0].slug, "slug-a")
+
+    def test_mark_part_verified(self) -> None:
+        state = UploadResumeState(
+            parts=[UploadedPart(1, "a", 10, "s1", verified=False)],
+        )
+        state.mark_part_verified(1)
+        self.assertTrue(state.parts[0].verified)
+
     def test_upload_complete(self) -> None:
         state = UploadResumeState(
             total_parts=2,

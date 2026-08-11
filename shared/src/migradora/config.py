@@ -128,6 +128,10 @@ class Settings:
     filester_stats_cache_sec: int = 60
     filester_upload_chunk_bytes: int = 1024 * 1024
     filester_upload_write_timeout_sec: int = 120
+    filester_verify_upload: bool = True
+    filester_verify_upload_strict: bool = False
+    filester_verify_upload_timeout_sec: int = 20
+    filester_verify_upload_max_wait_sec: int = 45
 
     # Web dashboard
     webui_port: int = 8080
@@ -238,6 +242,14 @@ class Settings:
             ),
             filester_upload_write_timeout_sec=max(
                 30, _env_int("FILESTER_UPLOAD_WRITE_TIMEOUT_SEC", 120)
+            ),
+            filester_verify_upload=_env_bool("FILESTER_VERIFY_UPLOAD", True),
+            filester_verify_upload_strict=_env_bool("FILESTER_VERIFY_UPLOAD_STRICT", False),
+            filester_verify_upload_timeout_sec=max(
+                5, _env_int("FILESTER_VERIFY_UPLOAD_TIMEOUT_SEC", 20)
+            ),
+            filester_verify_upload_max_wait_sec=max(
+                5, _env_int("FILESTER_VERIFY_UPLOAD_MAX_WAIT_SEC", 45)
             ),
             webui_port=_webui_port(),
             dashboard_host=_env("DASHBOARD_HOST", "0.0.0.0"),

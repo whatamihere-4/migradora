@@ -105,6 +105,12 @@ class FilesterClient:
         upload_chunk_bytes: int = 1024 * 1024,
         upload_write_timeout_sec: int = 120,
         upload_throttle_kbps: int = 0,
+        api_read_timeout_sec: int = 60,
+        verify_upload_enabled: bool = True,
+        verify_upload_strict: bool = False,
+        verify_upload_request_timeout_sec: int = 20,
+        verify_upload_max_wait_sec: int = 45,
+        verify_upload_poll_sec: float = 2.0,
     ) -> None:
         self.api_base = api_base.rstrip("/")
         self.max_retries = max_retries
@@ -113,6 +119,12 @@ class FilesterClient:
         self._upload_chunk_bytes = max(64 * 1024, upload_chunk_bytes)
         self._upload_write_timeout_sec = max(30, upload_write_timeout_sec)
         self._upload_throttle_kbps = max(0, upload_throttle_kbps)
+        self._api_read_timeout_sec = max(10, api_read_timeout_sec)
+        self._verify_upload_enabled = verify_upload_enabled
+        self._verify_upload_strict = verify_upload_strict
+        self._verify_upload_request_timeout_sec = max(5, verify_upload_request_timeout_sec)
+        self._verify_upload_max_wait_sec = max(5, verify_upload_max_wait_sec)
+        self._verify_upload_poll_sec = max(0.5, verify_upload_poll_sec)
         self._client = self._make_client()
         self._folder_index: FolderIndex | None = None
         self._nested_folder_cache: dict[tuple[str, str], FilesterFolder] = {}
@@ -145,10 +157,25 @@ class FilesterClient:
     def __exit__(self, *args: Any) -> None:
         self.close()
 
-    def _request(self, method: str, path: str, **kwargs: Any) -> dict[str, Any]:
+    def _api_timeout(self) -> httpx.Timeout:
+        return httpx.Timeout(
+            float(self._api_read_timeout_sec),
+            connect=15.0,
+            write=float(self._api_read_timeout_sec),
+        )
+
+    def _request(
+        self,
+        method: str,
+        path: str,
+        *,
+        timeout: httpx.Timeout | None = None,
+        **kwargs: Any,
+    ) -> dict[str, Any]:
+        req_timeout = timeout or self._api_timeout()
         for attempt in range(self.max_retries + 1):
             try:
-                resp = self._client.request(method, path, **kwargs)
+                resp = self._client.request(method, path, timeout=req_timeout, **kwargs)
                 if resp.status_code == 429:
                     wait = self.retry_delay * (2 ** attempt)
                     logger.warning("Filester rate limited, waiting %ds", wait)
@@ -168,6 +195,29 @@ class FilesterClient:
                     time.sleep(self.retry_delay)
                     continue
                 raise exc
+        return {}
+
+    def _api_request_once(
+        self,
+        method: str,
+        path: str,
+        *,
+        timeout: httpx.Timeout | None = None,
+        **kwargs: Any,
+    ) -> dict[str, Any]:
+        """Single HTTP attempt with no retries (used for post-upload verify)."""
+        req_timeout = timeout or self._api_timeout()
+        resp = self._client.request(method, path, timeout=req_timeout, **kwargs)
+        if resp.status_code == 429:
+            raise httpx.HTTPStatusError(
+                "rate limited",
+                request=resp.request,
+                response=resp,
+            )
+        resp.raise_for_status()
+        if resp.content:
+            parsed = resp.json()
+            return parsed if isinstance(parsed, dict) else {}
         return {}
 
     def _post_folder(self, endpoint: str, payload: dict[str, object]) -> dict[str, Any]:
@@ -727,6 +777,49 @@ class FilesterClient:
         rows = data.get("data")
         return rows if isinstance(rows, list) else []
 
+    def _recover_upload_response(
+        self,
+        filename: str,
+        expected_size: int,
+        folder_id: str | None,
+    ) -> dict[str, Any] | None:
+        """Find a folder file matching name + size when the upload POST response was lost."""
+        fid = (folder_id or "").strip()
+        if not fid or not filename:
+            return None
+        for row in self.list_folder_files(fid):
+            if not isinstance(row, dict):
+                continue
+            name = str(row.get("name") or row.get("filename") or "").strip()
+            if name != filename:
+                continue
+            size = int(row.get("size") or row.get("filesize") or 0)
+            if expected_size and size != expected_size:
+                continue
+            slug = str(
+                row.get("slug")
+                or row.get("identifier")
+                or row.get("id")
+                or ""
+            ).strip()
+            if slug:
+                return {"slug": slug, "data": row}
+        return None
+
+    @staticmethod
+    def _response_lost_after_full_upload(
+        exc: BaseException,
+        reader: Any,
+        total_size: int,
+    ) -> bool:
+        if reader is None or getattr(reader, "bytes_sent", 0) < total_size:
+            return False
+        if isinstance(exc, (httpx.TimeoutException, httpx.NetworkError)):
+            return True
+        if isinstance(exc, httpx.HTTPStatusError) and exc.response.status_code >= 500:
+            return True
+        return False
+
     @staticmethod
     def _parse_folder_from_create(data: dict[str, Any]) -> FilesterFolder | None:
         block = data.get("data")
@@ -799,6 +892,7 @@ class FilesterClient:
             )
 
         for attempt in range(self.max_retries + 1):
+            reader: _ProgressReader | None = None
             try:
                 with open(file_path, "rb") as raw_fh:
                     fh: Any = raw_fh
@@ -808,13 +902,14 @@ class FilesterClient:
                             if on_progress:
                                 on_progress(done, total)
 
-                        fh = _ProgressReader(
+                        reader = _ProgressReader(
                             raw_fh,
                             total_size,
                             progress_hook,
                             chunk_bytes=self._upload_chunk_bytes,
                             throttle_kbps=self._upload_throttle_kbps,
                         )
+                        fh = reader
                     files = {"file": (file_path.name, fh, "application/octet-stream")}
                     resp = self._client.post("/api/v1/upload", files=files, headers=headers)
                 if resp.status_code == 429:
@@ -836,6 +931,31 @@ class FilesterClient:
                     emit(f"[Filester] {file_path.name} DONE")
                 return result
             except (httpx.HTTPStatusError, httpx.TimeoutException, httpx.NetworkError) as exc:
+                if self._response_lost_after_full_upload(exc, reader, total_size):
+                    emit(
+                        f"[Filester] {file_path.name}: all {format_size(total_size)} sent "
+                        f"but API response failed ({exc}); not re-uploading"
+                    )
+                    recovered = self._recover_upload_response(
+                        file_path.name,
+                        total_size,
+                        folder_id,
+                    )
+                    if recovered:
+                        slug = self.file_identifier_from_response(recovered)
+                        if slug:
+                            emit(
+                                f"[Filester] {file_path.name} recovered -> "
+                                f"https://filester.me/d/{slug}"
+                            )
+                        else:
+                            emit(f"[Filester] {file_path.name} recovered from folder listing")
+                        return recovered
+                    raise RuntimeError(
+                        f"Upload of {file_path.name} may exist on Filester but the API "
+                        f"response was lost; refusing to re-upload (would duplicate). "
+                        f"Check folder {folder_id or 'root'} manually."
+                    ) from exc
                 if attempt < self.max_retries:
                     emit(f"[Filester] attempt {attempt + 1} failed: {exc}")
                     self.reset_connections()
@@ -880,24 +1000,175 @@ class FilesterClient:
             return result if isinstance(result, dict) else {}
         return {}
 
-    def verify_upload(self, slug: str, expected_size: int) -> bool:
-        try:
-            status = self._request("GET", "/api/v1/upload/status", params={"slug": slug})
-            if status.get("status") != "completed":
+    @staticmethod
+    def _response_api_error(body: dict[str, Any]) -> str:
+        err = body.get("error")
+        if isinstance(err, str) and err.strip():
+            return err.strip()
+        if body.get("success") is False:
+            msg = body.get("message")
+            if isinstance(msg, str) and msg.strip():
+                return msg.strip()
+        return ""
+
+    @staticmethod
+    def _response_status(body: dict[str, Any]) -> str:
+        raw = body.get("status")
+        if isinstance(raw, str) and raw.strip():
+            return raw.strip().lower()
+        data = body.get("data")
+        if isinstance(data, dict):
+            nested = data.get("status")
+            if isinstance(nested, str) and nested.strip():
+                return nested.strip().lower()
+        return ""
+
+    @staticmethod
+    def _response_file_block(body: dict[str, Any]) -> dict[str, Any]:
+        data = body.get("data")
+        if isinstance(data, dict):
+            nested = data.get("file")
+            if isinstance(nested, dict):
+                return nested
+            return data
+        return body if isinstance(body, dict) else {}
+
+    def _verify_timeout(self) -> httpx.Timeout:
+        sec = float(self._verify_upload_request_timeout_sec)
+        return httpx.Timeout(sec, connect=10.0, write=sec)
+
+    def _verify_file_detail(
+        self,
+        slug: str,
+        expected_size: int,
+        *,
+        verify_timeout: httpx.Timeout,
+        on_log: Callable[[str], None] | None = None,
+    ) -> tuple[bool, int]:
+        """Return (ok, actual_size) using GET /api/v1/file/{slug}."""
+        detail = self._api_request_once(
+            "GET",
+            f"/api/v1/file/{slug}",
+            timeout=verify_timeout,
+        )
+        file_data = self._response_file_block(detail)
+        actual_size = int(file_data.get("size") or file_data.get("filesize") or 0)
+        if actual_size <= 0:
+            return False, 0
+        if expected_size and actual_size != expected_size:
+            if self._verify_upload_strict:
+                return False, actual_size
+            return True, actual_size
+        return True, actual_size
+
+    def verify_upload(
+        self,
+        slug: str,
+        expected_size: int,
+        *,
+        on_log: Callable[[str], None] | None = None,
+    ) -> bool:
+        """Confirm the uploaded file is visible on Filester before advancing to the next part.
+
+        Uses ``GET /api/v1/file/{slug}`` (reliable). The ``/upload/status`` endpoint is
+        optional and skipped when it errors — Filester has been returning ``Database error``
+        there while the file API still works.
+
+        When ``verify_upload_strict`` is false (default), unreachable APIs do not block
+        the pipeline — the successful upload POST + slug is trusted instead.
+        """
+        slug = (slug or "").strip()
+        if not slug:
+            return False
+
+        def emit(line: str) -> None:
+            logger.info("%s", line)
+            if on_log:
+                on_log(line)
+
+        if not self._verify_upload_enabled:
+            emit(f"[Filester] verify {slug}: skipped (FILESTER_VERIFY_UPLOAD=false)")
+            return True
+
+        verify_timeout = self._verify_timeout()
+
+        def trust_upload(reason: str) -> bool:
+            if self._verify_upload_strict:
+                emit(f"[Filester] verify {slug}: failed ({reason})")
                 return False
-            detail = self._request("GET", f"/api/v1/file/{slug}")
-            file_data = detail.get("data", detail)
-            actual_size = int(file_data.get("size", 0))
-            if expected_size and actual_size != expected_size:
-                logger.warning(
-                    "Size mismatch for %s: expected %d, got %d",
-                    slug, expected_size, actual_size,
+            emit(
+                f"[Filester] verify {slug}: skipped ({reason}); "
+                "trust upload response and continuing"
+            )
+            return True
+
+        # Optional status probe — fall back to file API when broken (common during outages).
+        try:
+            status_body = self._api_request_once(
+                "GET",
+                "/api/v1/upload/status",
+                params={"slug": slug},
+                timeout=verify_timeout,
+            )
+            api_err = self._response_api_error(status_body)
+            if api_err:
+                emit(
+                    f"[Filester] verify {slug}: upload/status unavailable ({api_err}); "
+                    "using file API"
+                )
+            elif self._response_status(status_body) in ("failed", "error", "cancelled"):
+                emit(
+                    f"[Filester] verify {slug}: "
+                    f"status={self._response_status(status_body)}"
                 )
                 return False
-            return True
+            elif self._response_status(status_body) == "completed":
+                ok, actual_size = self._verify_file_detail(
+                    slug,
+                    expected_size,
+                    verify_timeout=verify_timeout,
+                )
+                if ok:
+                    emit(f"[Filester] verify {slug}: OK ({format_size(actual_size)})")
+                    return True
+        except httpx.TimeoutException as exc:
+            emit(
+                f"[Filester] verify {slug}: upload/status timed out ({exc}); using file API"
+            )
+        except httpx.HTTPError as exc:
+            emit(f"[Filester] verify {slug}: upload/status error ({exc}); using file API")
         except Exception as exc:
-            logger.error("Verify failed for %s: %s", slug, exc)
-            return False
+            logger.warning("Upload status check failed for %s: %s", slug, exc)
+
+        deadline = time.time() + self._verify_upload_max_wait_sec
+        while time.time() < deadline:
+            try:
+                ok, actual_size = self._verify_file_detail(
+                    slug,
+                    expected_size,
+                    verify_timeout=verify_timeout,
+                )
+                if ok and actual_size > 0:
+                    if expected_size and actual_size != expected_size:
+                        emit(
+                            f"[Filester] verify {slug}: size mismatch "
+                            f"(expected {expected_size}, got {actual_size}); trusting upload"
+                        )
+                    else:
+                        emit(f"[Filester] verify {slug}: OK ({format_size(actual_size)})")
+                    return True
+            except httpx.TimeoutException:
+                emit(f"[Filester] verify {slug}: file API slow, retrying…")
+            except httpx.HTTPError as exc:
+                emit(f"[Filester] verify {slug}: file API error ({exc}), retrying…")
+            except Exception as exc:
+                logger.warning("File detail check failed for %s: %s", slug, exc)
+            emit(f"[Filester] verify {slug}: waiting for file to appear on Filester…")
+            time.sleep(self._verify_upload_poll_sec)
+
+        return trust_upload(
+            f"file not confirmed after {self._verify_upload_max_wait_sec}s"
+        )
 
 
 class _ProgressReader:
@@ -918,6 +1189,10 @@ class _ProgressReader:
         self._chunk_bytes = max(64 * 1024, chunk_bytes)
         self._throttle_kbps = max(0, throttle_kbps)
         self._done = 0
+
+    @property
+    def bytes_sent(self) -> int:
+        return self._done
 
     def read(self, size: int = -1) -> bytes:
         if size < 0 or size > self._chunk_bytes:

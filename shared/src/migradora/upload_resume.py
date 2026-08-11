@@ -20,6 +20,7 @@ class UploadedPart:
     size_bytes: int
     slug: str
     upload_response: dict[str, Any] = field(default_factory=dict)
+    verified: bool = False
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -28,6 +29,7 @@ class UploadedPart:
             "size_bytes": self.size_bytes,
             "slug": self.slug,
             "upload_response": self.upload_response,
+            "verified": self.verified,
         }
 
     @classmethod
@@ -38,6 +40,7 @@ class UploadedPart:
             size_bytes=int(data["size_bytes"]),
             slug=str(data["slug"]),
             upload_response=data.get("upload_response") or {},
+            verified=bool(data.get("verified", True)),
         )
 
 
@@ -81,6 +84,24 @@ class UploadResumeState:
 
     def skip_part_indices(self) -> frozenset[int]:
         return frozenset(p.part_index for p in self.parts)
+
+    def part_for_index(self, part_index: int) -> UploadedPart | None:
+        for part in self.parts:
+            if part.part_index == part_index:
+                return part
+        return None
+
+    def append_part_if_new(self, part: UploadedPart) -> bool:
+        """Record a part once; return False if that part_index was already stored."""
+        if self.part_for_index(part.part_index):
+            return False
+        self.parts.append(part)
+        return True
+
+    def mark_part_verified(self, part_index: int) -> None:
+        part = self.part_for_index(part_index)
+        if part:
+            part.verified = True
 
     def uploaded_bytes(self) -> int:
         return sum(p.size_bytes for p in self.parts)

@@ -599,6 +599,8 @@ class PipelineCoordinator:
 
         upload_responses: list[dict] = [p.upload_response for p in resume_state.parts]
         slugs: list[str] = [p.slug for p in resume_state.parts]
+        if slugs and list(job.filester_slug or []) != slugs:
+            self.queue.update_file(job.id, filester_slug=slugs)
         was_split = resume_state.was_split
         skip_part_indices = resume_state.skip_part_indices()
         upload_phase_started = False
@@ -644,6 +646,10 @@ class PipelineCoordinator:
             upload_chunk_bytes=self.settings.filester_upload_chunk_bytes,
             upload_write_timeout_sec=self.settings.filester_upload_write_timeout_sec,
             upload_throttle_kbps=self.settings.upload_throttle_kbps,
+            verify_upload_enabled=self.settings.filester_verify_upload,
+            verify_upload_strict=self.settings.filester_verify_upload_strict,
+            verify_upload_request_timeout_sec=self.settings.filester_verify_upload_timeout_sec,
+            verify_upload_max_wait_sec=self.settings.filester_verify_upload_max_wait_sec,
         ) as filester:
             folder_id = ensure_filester_folder_path(
                 filester,
@@ -798,26 +804,44 @@ class PipelineCoordinator:
                     on_progress=on_upload_progress,
                     on_log=job_log,
                 )
-                upload_responses.append(result)
-                slug = result.get("slug", "")
+                slug = FilesterClient.file_identifier_from_response(result)
                 if not slug:
                     raise RuntimeError(f"Upload returned no slug: {result}")
-                if not filester.verify_upload(slug, part_size):
-                    raise RuntimeError(f"Upload verification failed: {slug}")
-                slugs.append(slug)
-                resume_state.parts.append(
-                    UploadedPart(
-                        part_index=part_index,
-                        filename=part["filename"],
-                        size_bytes=part_size,
-                        slug=slug,
-                        upload_response=result,
-                    )
+                uploaded_part = UploadedPart(
+                    part_index=part_index,
+                    filename=part["filename"],
+                    size_bytes=part_size,
+                    slug=slug,
+                    upload_response=result,
+                    verified=False,
                 )
-                resume_state.was_split = part_count > 1
-                resume_state.total_parts = part_count
+                if resume_state.append_part_if_new(uploaded_part):
+                    if slug not in slugs:
+                        slugs.append(slug)
+                    upload_responses.append(result)
+                    resume_state.was_split = part_count > 1
+                    resume_state.total_parts = part_count
+                    save_upload_resume_state(job_dir, resume_state)
+                    self.queue.update_file(job.id, filester_slug=slugs)
+                else:
+                    existing = resume_state.part_for_index(part_index)
+                    job_log(
+                        f"[Filester] part {part_index} already recorded "
+                        f"({existing.slug if existing else 'unknown'}); "
+                        "ignoring duplicate upload slug"
+                    )
+                    if existing:
+                        slug = existing.slug
+                if part_count > 1 and self._upload_reporter:
+                    self._upload_reporter.set_part_verifying(
+                        part_index,
+                        part_count,
+                        part["filename"],
+                    )
+                if not filester.verify_upload(slug, part_size, on_log=job_log):
+                    raise RuntimeError(f"Upload verification failed: {slug}")
+                resume_state.mark_part_verified(part_index)
                 save_upload_resume_state(job_dir, resume_state)
-                self.queue.update_file(job.id, filester_slug=slugs)
                 self._upload_bytes_done = part_base_done + part_size
                 if part_count > 1 and self._upload_reporter:
                     self._upload_reporter.complete_part(part_index)
