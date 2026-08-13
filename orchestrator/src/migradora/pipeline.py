@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import logging
+import math
 import shutil
 import threading
 import time
@@ -57,6 +58,53 @@ class JobSkipped(Exception):
 
 def write_heartbeat(state_dir: str) -> None:
     Path(state_dir, "pipeline.heartbeat").write_text(str(time.time()))
+
+
+def should_preserve_job_files_on_failure(attempts: int, max_retries: int) -> bool:
+    """Keep download dir and upload resume state when the job will be retried."""
+    return attempts < max_retries
+
+
+def _rebuild_resume_from_slugs(job, settings: Settings) -> UploadResumeState | None:
+    """Rebuild upload resume metadata from queue DB when on-disk state was lost."""
+    slugs = list(job.filester_slug or [])
+    if not slugs:
+        return None
+
+    size = int(job.size_bytes or 0)
+    max_part = settings.filester_max_file_bytes
+    if size > max_part:
+        total_parts = max(len(slugs), math.ceil(size / max_part))
+        was_split = True
+    else:
+        total_parts = max(len(slugs), 1)
+        was_split = len(slugs) > 1 or total_parts > 1
+
+    parts: list[UploadedPart] = []
+    for idx, slug in enumerate(slugs):
+        part_index = idx + 1
+        if size > max_part:
+            offset = (part_index - 1) * max_part
+            part_size = min(max_part, size - offset)
+        else:
+            part_size = size
+        parts.append(
+            UploadedPart(
+                part_index=part_index,
+                filename=f"{Path(job.filename).stem}.PART{part_index}{Path(job.filename).suffix}",
+                size_bytes=part_size,
+                slug=slug,
+                upload_response={"slug": slug},
+                verified=True,
+            )
+        )
+
+    return UploadResumeState(
+        oshash=job.oshash,
+        was_split=was_split,
+        total_parts=total_parts,
+        parts=parts,
+    )
 
 
 def _job_upload_folder_path(job) -> str:
@@ -363,10 +411,20 @@ class PipelineCoordinator:
             except Exception as exc:
                 logger.error("Pipeline failed for job %d: %s", job.id, exc)
                 record = self.queue.get_file(job.id)
-                self._release_job(
-                    job.id,
-                    record.local_path if record else None,
+                will_retry = should_preserve_job_files_on_failure(
+                    job.attempts,
+                    self.settings.download_max_retries,
                 )
+                if will_retry:
+                    logger.info(
+                        "Job %d will retry — preserving job dir and upload resume state",
+                        job.id,
+                    )
+                else:
+                    self._release_job(
+                        job.id,
+                        record.local_path if record else None,
+                    )
                 self._current_phase = "idle"
                 self._current_job_id = None
                 self._current_job_name = ""
@@ -376,11 +434,11 @@ class PipelineCoordinator:
                 self._upload_bytes_total = 0
                 self._upload_reporter = None
                 self._activity_text = ""
-                if job.attempts >= self.settings.download_max_retries:
-                    self.queue.mark_failed(job.id, str(exc), retry=False)
-                else:
+                if will_retry:
                     self.queue.mark_failed(job.id, str(exc), retry=True)
                     time.sleep(self.settings.download_retry_delay_sec)
+                else:
+                    self.queue.mark_failed(job.id, str(exc), retry=False)
 
         logger.info("Pipeline stopped")
 
@@ -438,7 +496,18 @@ class PipelineCoordinator:
                 )
                 return
 
-        resume_state = load_upload_resume_state(job_dir) or UploadResumeState()
+        resume_state = load_upload_resume_state(job_dir)
+        if resume_state is None and job.filester_slug:
+            resume_state = _rebuild_resume_from_slugs(job, self.settings)
+            if resume_state:
+                save_upload_resume_state(job_dir, resume_state)
+                self._append_job_log(
+                    job.id,
+                    f"[Resume] Rebuilt upload state from {len(resume_state.parts)} "
+                    f"slug(s) in queue DB",
+                )
+        if resume_state is None:
+            resume_state = UploadResumeState()
         local_path = self._try_resume_local_file(job, job_dir)
 
         if local_path is None:
