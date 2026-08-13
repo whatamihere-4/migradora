@@ -72,8 +72,10 @@ class Settings:
     real_debrid_api_base: str = "https://api.real-debrid.com/rest/1.0"
     real_debrid_preferred_cdn: str = ""
     real_debrid_remote: bool = False
+    real_debrid_ipv4_only: bool = True
     real_debrid_connect_timeout_sec: int = 15
     real_debrid_read_timeout_sec: int = 60
+    real_debrid_api_read_timeout_sec: int = 120
     real_debrid_api_max_retries: int = 5
     real_debrid_api_retry_delay_sec: int = 30
 
@@ -177,10 +179,14 @@ class Settings:
             ).rstrip("/"),
             real_debrid_preferred_cdn=_env("REAL_DEBRID_PREFERRED_CDN"),
             real_debrid_remote=_env_bool("REAL_DEBRID_REMOTE", False),
+            real_debrid_ipv4_only=_env_bool("REAL_DEBRID_IPV4_ONLY", True),
             real_debrid_connect_timeout_sec=max(
                 5, _env_int("REAL_DEBRID_CONNECT_TIMEOUT_SEC", 15)
             ),
             real_debrid_read_timeout_sec=max(30, _env_int("REAL_DEBRID_READ_TIMEOUT_SEC", 60)),
+            real_debrid_api_read_timeout_sec=max(
+                30, _env_int("REAL_DEBRID_API_READ_TIMEOUT_SEC", 120)
+            ),
             real_debrid_api_max_retries=max(
                 1, _env_int("REAL_DEBRID_API_MAX_RETRIES", 5)
             ),

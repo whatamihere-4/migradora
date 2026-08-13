@@ -5,6 +5,7 @@ from __future__ import annotations
 import json
 import logging
 import re
+import socket
 import time
 from typing import Callable
 from urllib.parse import urlparse, urlunparse
@@ -12,10 +13,33 @@ from urllib.parse import urlparse, urlunparse
 import httpx
 
 from migradora.config import Settings
-from migradora.http_download import DOWNLOAD_HEADERS
 from migradora.interrupt import interruptible_sleep
 
 logger = logging.getLogger("migradora.realdebrid")
+
+_ipv4_only_enabled = False
+
+
+def enable_ipv4_only() -> None:
+    """Force IPv4 for Real-Debrid API calls (avoids VPS IPv6 blackholes)."""
+    global _ipv4_only_enabled
+    if _ipv4_only_enabled:
+        return
+    _orig = socket.getaddrinfo
+
+    def _ipv4(
+        host: str,
+        port: object,
+        family: int = 0,
+        type: int = 0,
+        proto: int = 0,
+        flags: int = 0,
+    ) -> list[tuple]:
+        return _orig(host, port, socket.AF_INET, type, proto, flags)
+
+    socket.getaddrinfo = _ipv4  # type: ignore[method-assign, assignment]
+    _ipv4_only_enabled = True
+    logger.info("Real-Debrid API: using IPv4 only")
 
 _PAGE_LIMIT = 5000
 
@@ -133,12 +157,17 @@ def _log(msg: str, on_log: Callable[[str], None] | None) -> None:
 class RealDebridClient:
     def __init__(self, settings: Settings) -> None:
         self.settings = settings
+        if settings.real_debrid_ipv4_only:
+            enable_ipv4_only()
+        api_read = max(
+            settings.real_debrid_api_read_timeout_sec,
+            settings.real_debrid_read_timeout_sec,
+        )
         self._client = httpx.Client(
-            headers=DOWNLOAD_HEADERS,
             timeout=httpx.Timeout(
                 connect=settings.real_debrid_connect_timeout_sec,
-                read=settings.real_debrid_read_timeout_sec,
-                write=settings.real_debrid_read_timeout_sec,
+                read=api_read,
+                write=api_read,
                 pool=settings.real_debrid_connect_timeout_sec,
             ),
             follow_redirects=True,
@@ -229,6 +258,7 @@ class RealDebridClient:
         self,
         link: str,
         skip_check: Callable[[], None] | None = None,
+        on_log: Callable[[str], None] | None = None,
     ) -> dict:
         token = (self.settings.real_debrid_api_token or "").strip()
         if not token:
@@ -237,6 +267,10 @@ class RealDebridClient:
         data: dict[str, str] = {"link": link.strip()}
         if self.settings.real_debrid_remote:
             data["remote"] = "1"
+            _log(
+                "[RD] REAL_DEBRID_REMOTE=1 — API may wait on upstream hoster during unrestrict",
+                on_log,
+            )
 
         base = self.settings.real_debrid_api_base.rstrip("/")
         max_retries = max(1, self.settings.real_debrid_api_max_retries)
@@ -247,6 +281,11 @@ class RealDebridClient:
         for attempt in range(max_retries):
             if skip_check:
                 skip_check()
+            attempt_no = attempt + 1
+            _log(
+                f"[RD] POST /unrestrict/link (attempt {attempt_no}/{max_retries})…",
+                on_log,
+            )
             try:
                 resp = self._client.post(
                     f"{base}/unrestrict/link",
@@ -258,14 +297,13 @@ class RealDebridClient:
                     skip_check()
                 if attempt + 1 >= max_retries:
                     raise RealDebridError(f"Real-Debrid API request failed: {exc}") from exc
-                wait = retry_delay * (attempt + 1)
-                logger.warning(
-                    "Real-Debrid unrestrict failed (%s); retry %d/%d in %ds",
-                    exc,
-                    attempt + 1,
-                    max_retries,
-                    wait,
+                wait = retry_delay * attempt_no
+                msg = (
+                    f"[RD] API error ({exc.__class__.__name__}: {exc}); "
+                    f"retry {attempt_no}/{max_retries} in {wait}s"
                 )
+                logger.warning(msg)
+                _log(msg, on_log)
                 interruptible_sleep(wait, skip_check=skip_check)
                 continue
 
@@ -282,17 +320,16 @@ class RealDebridClient:
                 except ValueError:
                     last_detail = (resp.text or "").strip()[:300]
                 if attempt + 1 < max_retries:
-                    wait = retry_delay * (attempt + 1)
+                    wait = retry_delay * attempt_no
                     if last_detail == "hoster_unavailable":
                         wait = max(wait, 60)
-                    logger.warning(
-                        "Real-Debrid unrestrict HTTP %s %s; retry %d/%d in %ds",
-                        resp.status_code,
-                        last_detail or "",
-                        attempt + 1,
-                        max_retries,
-                        wait,
+                    msg = (
+                        f"[RD] API HTTP {resp.status_code}"
+                        f"{f' ({last_detail})' if last_detail else ''}; "
+                        f"retry {attempt_no}/{max_retries} in {wait}s"
                     )
+                    logger.warning(msg)
+                    _log(msg, on_log)
                     interruptible_sleep(wait, skip_check=skip_check)
                     continue
             if not resp.is_success:
@@ -341,7 +378,7 @@ class RealDebridClient:
                 return apply_preferred_cdn(raw, self.settings, on_log=on_log)
 
             _log(f"[RD] Resolving panel link via API: {raw}", on_log)
-            payload = self.unrestrict_link(raw, skip_check=skip_check)
+            payload = self.unrestrict_link(raw, skip_check=skip_check, on_log=on_log)
             download = (payload.get("download") or "").strip()
             if not download:
                 raise RealDebridError("Real-Debrid API returned no download URL")
@@ -385,7 +422,7 @@ class RealDebridClient:
                 }
             host = urlparse(raw).hostname or raw
             _log(f"[RD] Unrestricting panel link ({host})…", on_log)
-            payload = self.unrestrict_link(raw, skip_check=skip_check)
+            payload = self.unrestrict_link(raw, skip_check=skip_check, on_log=on_log)
             download = (payload.get("download") or "").strip()
             if not download:
                 raise RealDebridError("Real-Debrid API returned no download URL")
