@@ -7,8 +7,10 @@ import math
 import shutil
 import threading
 import time
-from collections.abc import Callable
+from collections.abc import Callable, Iterator
+from contextlib import contextmanager
 from pathlib import Path
+from urllib.parse import urlparse
 
 import httpx
 from pathvalidate import sanitize_filename
@@ -16,11 +18,15 @@ from pathvalidate import sanitize_filename
 from migradora.config import Settings
 from migradora.filester_client import FilesterClient
 from migradora.gofile_client import GofileClient
-from migradora.http_download import download_url
+from migradora.http_download import DOWNLOAD_HEADERS, download_url
 from migradora.models import FileStatus, QueueState
 from migradora.oshash import compute_oshash, verify_oshash
 from migradora.queue.manager import QueueManager
-from migradora.realdebrid_client import is_realdebrid_url, RealDebridClient
+from migradora.realdebrid_client import (
+    is_realdebrid_url,
+    needs_resolution,
+    RealDebridClient,
+)
 from migradora.splitter import iter_upload_parts
 from migradora.size_limits import (
     disk_insufficient_skip_reason,
@@ -158,6 +164,8 @@ class PipelineCoordinator:
         self._upload_reporter: UploadProgressReporter | None = None
         self._activity_text: str = ""
         self._last_activity_at: float = 0.0
+        self._io_lock = threading.Lock()
+        self._active_io_closers: list[Callable[[], None]] = []
 
     def _set_activity(self, text: str, *, force: bool = False) -> None:
         now = time.time()
@@ -231,6 +239,25 @@ class PipelineCoordinator:
 
     def request_skip(self, job_id: int) -> None:
         self._skip_job_id = job_id
+        with self._io_lock:
+            closers = list(self._active_io_closers)
+        for closer in closers:
+            try:
+                closer()
+            except Exception:
+                pass
+
+    @contextmanager
+    def _interruptible_io(self, closer: Callable[[], None]) -> Iterator[None]:
+        with self._io_lock:
+            self._active_io_closers.append(closer)
+        try:
+            yield
+        finally:
+            with self._io_lock:
+                self._active_io_closers = [
+                    item for item in self._active_io_closers if item is not closer
+                ]
 
     def _check_skip(self, job_id: int) -> None:
         if self._skip_job_id == job_id:
@@ -443,6 +470,7 @@ class PipelineCoordinator:
         logger.info("Pipeline stopped")
 
     def _process_job(self, job) -> None:
+        logger.info("Job %d: processing %s", job.id, job.filename)
         rd_url = _job_rd_url(job)
         gofile_url = _job_gofile_url(job)
         if not rd_url and not gofile_url:
@@ -549,14 +577,22 @@ class PipelineCoordinator:
                 self._check_skip(job.id)
 
             if rd_url:
-                self._append_job_log(job.id, f"[RD] Download via Real-Debrid: {job.filename}")
+                kind = "panel" if needs_resolution(rd_url) else "cdn"
+                src_host = urlparse(rd_url).hostname or ""
+                logger.info("Job %d: Real-Debrid %s link (%s)", job.id, kind, src_host)
+                self._append_job_log(
+                    job.id,
+                    f"[RD] Download via Real-Debrid ({kind} {src_host}): {job.filename}",
+                )
                 skip_check()
+                write_heartbeat(self.settings.state_dir)
                 with RealDebridClient(self.settings) as rd:
-                    meta = rd.resolve_metadata(
-                        rd_url,
-                        on_log=job_log,
-                        skip_check=skip_check,
-                    )
+                    with self._interruptible_io(rd.close):
+                        meta = rd.resolve_metadata(
+                            rd_url,
+                            on_log=job_log,
+                            skip_check=skip_check,
+                        )
                 direct = (meta.get("download_url") or "").strip()
                 if not direct:
                     raise RuntimeError("Real-Debrid returned no download URL")
@@ -574,17 +610,24 @@ class PipelineCoordinator:
                     write=self.settings.real_debrid_read_timeout_sec,
                     pool=self.settings.real_debrid_connect_timeout_sec,
                 )
-                with httpx.Client(timeout=timeout, follow_redirects=True) as http:
-                    dest = job_dir / sanitize_filename(job.filename)
-                    download_url(
-                        http,
-                        direct,
-                        dest,
-                        expected_size=expected_size,
-                        throttle_kbps=self.settings.download_throttle_kbps,
-                        on_progress=on_download_progress,
-                        skip_check=skip_check,
-                    )
+                dest = job_dir / sanitize_filename(job.filename)
+                write_heartbeat(self.settings.state_dir)
+                with httpx.Client(
+                    headers=DOWNLOAD_HEADERS,
+                    timeout=timeout,
+                    follow_redirects=True,
+                ) as http:
+                    with self._interruptible_io(http.close):
+                        download_url(
+                            http,
+                            direct,
+                            dest,
+                            expected_size=expected_size,
+                            throttle_kbps=self.settings.download_throttle_kbps,
+                            on_progress=on_download_progress,
+                            skip_check=skip_check,
+                            on_log=job_log,
+                        )
                 local_path = dest
             else:
                 skip_check()

@@ -3,16 +3,19 @@
 from __future__ import annotations
 
 import json
+import logging
 import re
 import time
-import unicodedata
 from typing import Callable
 from urllib.parse import urlparse, urlunparse
 
 import httpx
 
 from migradora.config import Settings
+from migradora.http_download import DOWNLOAD_HEADERS
 from migradora.interrupt import interruptible_sleep
+
+logger = logging.getLogger("migradora.realdebrid")
 
 _PAGE_LIMIT = 5000
 
@@ -122,6 +125,7 @@ def apply_preferred_cdn(
 
 
 def _log(msg: str, on_log: Callable[[str], None] | None) -> None:
+    logger.info(msg)
     if on_log:
         on_log(msg)
 
@@ -130,6 +134,7 @@ class RealDebridClient:
     def __init__(self, settings: Settings) -> None:
         self.settings = settings
         self._client = httpx.Client(
+            headers=DOWNLOAD_HEADERS,
             timeout=httpx.Timeout(
                 connect=settings.real_debrid_connect_timeout_sec,
                 read=settings.real_debrid_read_timeout_sec,
@@ -240,6 +245,8 @@ class RealDebridClient:
 
         last_detail = ""
         for attempt in range(max_retries):
+            if skip_check:
+                skip_check()
             try:
                 resp = self._client.post(
                     f"{base}/unrestrict/link",
@@ -247,9 +254,19 @@ class RealDebridClient:
                     data=data,
                 )
             except httpx.HTTPError as exc:
+                if skip_check:
+                    skip_check()
                 if attempt + 1 >= max_retries:
                     raise RealDebridError(f"Real-Debrid API request failed: {exc}") from exc
-                interruptible_sleep(retry_delay * (attempt + 1), skip_check=skip_check)
+                wait = retry_delay * (attempt + 1)
+                logger.warning(
+                    "Real-Debrid unrestrict failed (%s); retry %d/%d in %ds",
+                    exc,
+                    attempt + 1,
+                    max_retries,
+                    wait,
+                )
+                interruptible_sleep(wait, skip_check=skip_check)
                 continue
 
             if resp.status_code == 401:
@@ -268,6 +285,14 @@ class RealDebridClient:
                     wait = retry_delay * (attempt + 1)
                     if last_detail == "hoster_unavailable":
                         wait = max(wait, 60)
+                    logger.warning(
+                        "Real-Debrid unrestrict HTTP %s %s; retry %d/%d in %ds",
+                        resp.status_code,
+                        last_detail or "",
+                        attempt + 1,
+                        max_retries,
+                        wait,
+                    )
                     interruptible_sleep(wait, skip_check=skip_check)
                     continue
             if not resp.is_success:
@@ -344,13 +369,32 @@ class RealDebridClient:
         if needs_resolution(raw):
             if skip_check:
                 skip_check()
+            token = (self.settings.real_debrid_api_token or "").strip()
+            if not token:
+                _log(
+                    "[RD] Panel link detected but REAL_DEBRID_API_TOKEN is not set; "
+                    "using URL as-is (CDN resolution skipped)",
+                    on_log,
+                )
+                download = apply_preferred_cdn(raw, self.settings, on_log=on_log)
+                return {
+                    "download_url": download,
+                    "filename": filename,
+                    "filesize": filesize,
+                    "resolved": False,
+                }
+            host = urlparse(raw).hostname or raw
+            _log(f"[RD] Unrestricting panel link ({host})…", on_log)
             payload = self.unrestrict_link(raw, skip_check=skip_check)
             download = (payload.get("download") or "").strip()
             if not download:
                 raise RealDebridError("Real-Debrid API returned no download URL")
             filename = (payload.get("filename") or "").strip()
             filesize = int(payload.get("filesize") or 0)
-            download = apply_preferred_cdn(download, self.settings)
+            cdn_host = urlparse(download).hostname or download
+            label = f"{cdn_host}/…/{filename}" if filename else cdn_host
+            _log(f"[RD] Fresh CDN link: {label} ({filesize} bytes)", on_log)
+            download = apply_preferred_cdn(download, self.settings, on_log=on_log)
             return {
                 "download_url": download,
                 "filename": filename,
@@ -358,7 +402,13 @@ class RealDebridClient:
                 "resolved": True,
             }
 
-        download = apply_preferred_cdn(raw, self.settings)
+        host = urlparse(raw).hostname or raw
+        _log(
+            f"[RD] Stored CDN URL ({host}) — not re-unrestricted; these expire. "
+            "Prefer a panel link (real-debrid.com/d/…)",
+            on_log,
+        )
+        download = apply_preferred_cdn(raw, self.settings, on_log=on_log)
         return {
             "download_url": download,
             "filename": filename,
