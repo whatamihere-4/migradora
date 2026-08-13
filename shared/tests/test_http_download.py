@@ -127,3 +127,40 @@ class RealDebridResolveTests(unittest.TestCase):
         mock_unrestrict.assert_not_called()
         self.assertFalse(meta["resolved"])
         self.assertTrue(any("Stored CDN URL" in line for line in logs))
+
+    def test_hoster_unavailable_falls_back_to_downloads_cache(self) -> None:
+        from migradora.config import Settings
+        from migradora.realdebrid_client import RealDebridClient, RealDebridError
+
+        settings = Settings(real_debrid_api_token="token")
+        panel = "https://real-debrid.com/d/AbCdEf123/"
+        name = "VRxResident Evil 4 A XXX Parody.mp4"
+        logs: list[str] = []
+
+        with patch.object(
+            RealDebridClient,
+            "unrestrict_link",
+            side_effect=RealDebridError("Real-Debrid API HTTP 503: hoster_unavailable"),
+        ):
+            with patch.object(
+                RealDebridClient,
+                "find_cached_download",
+                return_value={
+                    "download_url": "https://nyk7-4.download.real-debrid.com/d/X/file.mp4",
+                    "filename": name,
+                    "filesize": 999,
+                    "resolved": True,
+                    "source": "downloads_cache",
+                },
+            ) as mock_cache:
+                with RealDebridClient(settings) as rd:
+                    meta = rd.resolve_metadata(
+                        panel,
+                        filename_hint=name,
+                        on_log=logs.append,
+                    )
+
+        mock_cache.assert_called_once()
+        self.assertEqual(mock_cache.call_args.args[0], name)
+        self.assertEqual(meta["source"], "downloads_cache")
+        self.assertTrue(any("/downloads cache" in line for line in logs))

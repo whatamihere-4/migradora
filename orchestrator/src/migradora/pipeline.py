@@ -590,6 +590,7 @@ class PipelineCoordinator:
                     with self._interruptible_io(rd.close):
                         meta = rd.resolve_metadata(
                             rd_url,
+                            filename_hint=job.filename,
                             on_log=job_log,
                             skip_check=skip_check,
                         )

@@ -234,6 +234,40 @@ class RealDebridClient:
     def list_torrents(self) -> list[dict]:
         return self._api_get_list("/torrents")
 
+    def list_downloads(self) -> list[dict]:
+        return self._api_get_list("/downloads")
+
+    def find_cached_download(
+        self,
+        filename: str,
+        *,
+        on_log: Callable[[str], None] | None = None,
+    ) -> dict | None:
+        """Match a filename against GET /downloads (already on RD account)."""
+        from migradora.realdebrid_match import norm_filename
+
+        key = norm_filename(filename)
+        if not key:
+            return None
+        for item in self.list_downloads():
+            name = (item.get("filename") or "").strip()
+            if norm_filename(name) != key:
+                continue
+            link = (item.get("download") or item.get("link") or "").strip()
+            if not link:
+                continue
+            size = int(item.get("filesize") or 0)
+            _log(f"[RD] /downloads cache hit: {name} ({size} bytes)", on_log)
+            download = apply_preferred_cdn(link, self.settings, on_log=on_log)
+            return {
+                "download_url": download,
+                "filename": name,
+                "filesize": size,
+                "resolved": True,
+                "source": "downloads_cache",
+            }
+        return None
+
     def torrent_info(self, torrent_id: str) -> dict:
         token = (self.settings.real_debrid_api_token or "").strip()
         if not token:
@@ -259,16 +293,20 @@ class RealDebridClient:
         link: str,
         skip_check: Callable[[], None] | None = None,
         on_log: Callable[[str], None] | None = None,
+        *,
+        remote: bool | None = None,
+        fast_fail_hoster: bool = True,
     ) -> dict:
         token = (self.settings.real_debrid_api_token or "").strip()
         if not token:
             raise RealDebridError("REAL_DEBRID_API_TOKEN is not set")
 
         data: dict[str, str] = {"link": link.strip()}
-        if self.settings.real_debrid_remote:
+        use_remote = self.settings.real_debrid_remote if remote is None else remote
+        if use_remote:
             data["remote"] = "1"
             _log(
-                "[RD] REAL_DEBRID_REMOTE=1 — API may wait on upstream hoster during unrestrict",
+                "[RD] unrestrict remote=1 — RD may fetch via its cache/upstream",
                 on_log,
             )
 
@@ -322,6 +360,15 @@ class RealDebridClient:
                 if attempt + 1 < max_retries:
                     wait = retry_delay * attempt_no
                     if last_detail == "hoster_unavailable":
+                        msg = (
+                            "[RD] hoster_unavailable — RD cannot reach the upstream hoster "
+                            "for this link (often temporary or dead torrent source)"
+                        )
+                        _log(msg, on_log)
+                        if fast_fail_hoster:
+                            raise RealDebridError(
+                                f"Real-Debrid API HTTP {resp.status_code}: hoster_unavailable"
+                            )
                         wait = max(wait, 60)
                     msg = (
                         f"[RD] API HTTP {resp.status_code}"
@@ -395,6 +442,7 @@ class RealDebridClient:
         self,
         url: str,
         *,
+        filename_hint: str = "",
         on_log: Callable[[str], None] | None = None,
         skip_check: Callable[[], None] | None = None,
     ) -> dict:
@@ -422,7 +470,37 @@ class RealDebridClient:
                 }
             host = urlparse(raw).hostname or raw
             _log(f"[RD] Unrestricting panel link ({host})…", on_log)
-            payload = self.unrestrict_link(raw, skip_check=skip_check, on_log=on_log)
+            payload: dict | None = None
+            try:
+                payload = self.unrestrict_link(raw, skip_check=skip_check, on_log=on_log)
+            except RealDebridError as exc:
+                if "hoster_unavailable" not in str(exc).lower():
+                    raise
+                hint = (filename_hint or "").strip()
+                if hint:
+                    _log("[RD] Trying GET /downloads cache by filename…", on_log)
+                    cached = self.find_cached_download(hint, on_log=on_log)
+                    if cached:
+                        return cached
+                if not self.settings.real_debrid_remote:
+                    _log("[RD] Retrying unrestrict with remote=1…", on_log)
+                    try:
+                        payload = self.unrestrict_link(
+                            raw,
+                            skip_check=skip_check,
+                            on_log=on_log,
+                            remote=True,
+                            fast_fail_hoster=True,
+                        )
+                    except RealDebridError:
+                        payload = None
+                if payload is None:
+                    raise RealDebridError(
+                        "Real-Debrid hoster_unavailable: upstream source unreachable and "
+                        "no matching file in your /downloads list. "
+                        "In RD web UI: confirm the torrent is still Downloaded, or delete "
+                        "and re-add it, then paste a fresh panel link."
+                    ) from exc
             download = (payload.get("download") or "").strip()
             if not download:
                 raise RealDebridError("Real-Debrid API returned no download URL")
