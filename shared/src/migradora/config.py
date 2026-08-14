@@ -89,7 +89,6 @@ class Settings:
     filester_auto_create_folders: bool = True
     filester_max_file_bytes: int = 10_200_547_328  # 9.5 GiB
     filester_split_mode: str = "bytes"
-    filester_split_fallback: str = "bytes"
     ffmpeg_bin: str = "ffmpeg"
     ffprobe_bin: str = "ffprobe"
     mkvmerge_bin: str = "mkvmerge"
@@ -203,9 +202,6 @@ class Settings:
             filester_auto_create_folders=_env_bool("FILESTER_AUTO_CREATE_FOLDERS", True),
             filester_max_file_bytes=_env_int("FILESTER_MAX_FILE_BYTES", 10_200_547_328),
             filester_split_mode=parse_split_mode(_env("FILESTER_SPLIT_MODE", "bytes")),
-            filester_split_fallback=parse_split_mode(
-                _env("FILESTER_SPLIT_FALLBACK", "bytes"), default="bytes"
-            ),
             ffmpeg_bin=_env("FFMPEG_BIN", "ffmpeg"),
             ffprobe_bin=_env("FFPROBE_BIN", "ffprobe"),
             mkvmerge_bin=_env("MKVMERGE_BIN", "mkvmerge"),

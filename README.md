@@ -132,31 +132,9 @@ Files over `FILESTER_MAX_FILE_BYTES` (~9.5 GiB) are split before upload. Set `FI
 | Mode | Parts | Peak disk | Rejoin |
 |------|-------|-----------|--------|
 | `bytes` (default) | `movie.mp4.part001`, … | source + one part | `cat movie.mp4.part* > movie.mp4` |
-| `ffmpeg_slice` | `movie.PART1.mp4`, … (playable) | source + one part | paste `mkvmerge` one-liner (see README) |
+| `ffmpeg_slice` | `movie.PART1.mp4`, … (playable) | source + one part | `ffmpeg -f concat -safe 0 -i list.txt -c copy movie.mp4` |
 
-`ffmpeg_slice` uses more CPU than `bytes` but keeps the same low disk footprint — useful on small VPS disks when you want independently playable parts. Splits are aligned to video keyframes so each part is playable on its own. **Merge:** open a terminal in the parts folder, paste one command ([Windows PowerShell](#merge-parts-windows) or [Mac/Linux Terminal](#merge-parts-mac-linux)) — requires [MKVToolNix](https://mkvtoolnix.download/) (`mkvmerge` on PATH). Extraction uses ffmpeg input seek by default (`SPLITTER_EXTRACT_BACKEND=ffmpeg`); legacy `mkvmerge` fifo mode is much slower on large MP4s.
-
-### Merge parts (Windows)
-
-1. Install [MKVToolNix](https://mkvtoolnix.download/) if needed.
-2. Open **PowerShell** in the folder with the `PART1` / `PART2` files (Shift+right-click → “Open PowerShell window here”, or `cd` into the folder).
-3. Paste this **one line**, press Enter:
-
-```powershell
-$p1=(gci *.PART1.*|select -first 1).Name;$o=$p1-replace'\PART1\.';$t=1;$h=($o-replace'\..+$','')+'.merge_trim_frames';if(Test-Path $h){$t=[int](gc $h)};$x=@('-o',$o,$p1);for($i=2;$i -le 20;$i++){if(Test-Path ($p1-replace'PART1',"PART$i")){if($t-gt0){$x+=('--split','parts-frames:'+$t+'-')};$x+=('+'+($p1-replace'PART1',"PART$i"))}};mkvmerge @x
-```
-
-### Merge parts (Mac/Linux)
-
-1. Install MKVToolNix (`mkvmerge` on PATH).
-2. Open **Terminal** in the parts folder (`cd` to the folder).
-3. Paste this **one line**, press Enter:
-
-```bash
-f=$(ls -1v *.PART1.* | head -1); o=${f/.PART1./.}; t=1; [ -f "${o%.*}.merge_trim_frames" ] && t=$(tr -d '\r\n ' < "${o%.*}.merge_trim_frames"); mkvmerge -o "$o" "$f" $(i=2; while [ -f "${f/.PART1./.PART$i.}" ]; do [ "$t" -gt 0 ] && echo --split parts-frames:$t-; echo +${f/.PART1./.PART$i.}; i=$((i+1)); done)
-```
-
-Older uploads without a `.merge_trim_frames` file default to trimming one frame at each join (fixes a brief hitch on legacy splits).
+`ffmpeg_slice` uses more CPU than `bytes` but keeps the same low disk footprint — useful on small VPS disks when you want independently playable parts. Splits are aligned to video keyframes so each part is playable on its own and parts rejoin cleanly with stream-copy concat (no re-encode). Extraction uses ffmpeg input seek by default (`SPLITTER_EXTRACT_BACKEND=ffmpeg`); legacy `mkvmerge` fifo mode is much slower on large MP4s.
 
 Split uploads are placed in a Filester subfolder under the studio folder, named after the original video filename (e.g. `VR/Studio1/My Scene.mp4/` containing the parts). This is automatic when a file exceeds `FILESTER_MAX_FILE_BYTES` — no extra env var.
 

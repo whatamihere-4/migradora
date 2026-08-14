@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from migradora.config import Settings
-from migradora.splitter import parse_split_mode, required_disk_bytes
+from migradora.splitter import required_disk_bytes
 from migradora.utils import free_disk_gb
 
 _GIB = 1024**3
@@ -88,30 +88,6 @@ def incremental_disk_gb(
     on_disk = max(0, min(bytes_already_on_disk, file_size))
     incremental_bytes = max(0, peak_bytes - on_disk)
     return incremental_bytes / _GIB + settings.min_free_disk_gb
-
-
-def resolve_split_mode(file_size: int, settings: Settings) -> str:
-    """Pick the effective split mode for a file (resolves ``optimal``)."""
-    configured = parse_split_mode(settings.filester_split_mode)
-    if configured != "optimal":
-        return configured
-    if file_size <= settings.filester_max_file_bytes:
-        return "bytes"
-    ffmpeg_need_gb = (
-        required_disk_bytes(
-            file_size,
-            settings.filester_max_file_bytes,
-            split_mode="ffmpeg",
-        )
-        / _GIB
-        + settings.min_free_disk_gb
-    )
-    if free_disk_gb(settings.download_dir) >= ffmpeg_need_gb:
-        return "ffmpeg"
-    fallback = parse_split_mode(settings.filester_split_fallback, default="bytes")
-    if fallback == "optimal":
-        fallback = "bytes"
-    return fallback
 
 
 def oversize_skip_reason(file_size: int, settings: Settings) -> str | None:

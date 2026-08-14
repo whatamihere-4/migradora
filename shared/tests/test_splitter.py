@@ -13,8 +13,6 @@ class SplitModeTests(unittest.TestCase):
         self.assertEqual(parse_split_mode("cat"), "bytes")
         self.assertEqual(parse_split_mode("ffmpeg_slice"), "ffmpeg_slice")
         self.assertEqual(parse_split_mode("slice"), "ffmpeg_slice")
-        self.assertEqual(parse_split_mode("ffmpeg"), "ffmpeg")
-        self.assertEqual(parse_split_mode("optimal"), "optimal")
         self.assertEqual(parse_split_mode("unknown", default="bytes"), "bytes")
 
     def test_required_disk_bytes_modes(self) -> None:
