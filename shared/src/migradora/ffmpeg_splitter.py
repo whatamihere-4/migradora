@@ -2,7 +2,8 @@
 
 Each part is extracted with ``mkvmerge --split parts:…`` (clean time boundaries on MP4
 input), streamed through a named pipe into ``ffmpeg -c copy`` (no temp file on disk).
-Parts are named ``<name>.PART1.<ext>`` … and rejoin losslessly with the concat demuxer.
+Parts are named ``<name>.PART1.<ext>`` … Users merge with a pasted ``mkvmerge`` one-liner
+(see :func:`format_merge_oneliner_bash`).
 """
 
 from __future__ import annotations
@@ -107,6 +108,417 @@ def probe_duration(path: str | Path, *, ffprobe_bin: str = "ffprobe") -> float:
             f"cannot split {Path(path).name}"
         )
     return dur
+
+
+def probe_frame_step(path: str | Path, ffprobe_bin: str = "ffprobe") -> float:
+    """Return nominal frame duration in seconds (inverse of avg frame rate)."""
+    proc = subprocess.run(
+        [
+            ffprobe_bin,
+            "-v",
+            "error",
+            "-select_streams",
+            "v:0",
+            "-show_entries",
+            "stream=avg_frame_rate",
+            "-of",
+            "default=noprint_wrappers=1:nokey=1",
+            str(path),
+        ],
+        capture_output=True,
+        text=True,
+        timeout=120,
+    )
+    if proc.returncode != 0:
+        return 1.0 / 60.0
+    raw = (proc.stdout or "").strip().splitlines()[0].strip()
+    if "/" in raw:
+        num, den = raw.split("/", 1)
+        try:
+            n, d = float(num), float(den)
+            if d > 0 and n > 0:
+                return 1.0 / (n / d)
+        except ValueError:
+            pass
+    try:
+        rate = float(raw)
+        if rate > 0:
+            return 1.0 / rate
+    except ValueError:
+        pass
+    return 1.0 / 60.0
+
+
+def format_merge_oneliner_bash() -> str:
+    """One paste into Mac/Linux Terminal (needs mkvmerge on PATH)."""
+    return (
+        "f=$(ls -1v *.PART1.* | head -1); o=${f/.PART1./.}; t=1; "
+        "[ -f \"${o%.*}.merge_trim_frames\" ] && "
+        "t=$(tr -d '\\r\\n ' < \"${o%.*}.merge_trim_frames\"); "
+        "mkvmerge -o \"$o\" \"$f\" "
+        "$(i=2; while [ -f \"${f/.PART1./.PART$i.}\" ]; do "
+        "[ \"$t\" -gt 0 ] && echo --split parts-frames:$t-; "
+        "echo +${f/.PART1./.PART$i.}; i=$((i+1)); done)"
+    )
+
+
+def format_merge_oneliner_powershell() -> str:
+    """One paste into Windows PowerShell (needs mkvmerge on PATH)."""
+    return (
+        "$p1=(gci *.PART1.*|select -first 1).Name;$o=$p1-replace'\\.PART1\\.';"
+        "$t=1;$h=($o-replace'\\.[^.]+$','')+'.merge_trim_frames';"
+        "if(Test-Path $h){$t=[int](gc $h)};"
+        "$x=@('-o',$o,$p1);for($i=2;$i -le 20;$i++){"
+        "if(Test-Path ($p1-replace'PART1',\"PART$i\")){"
+        "if($t-gt0){$x+=('--split','parts-frames:'+$t+'-')};"
+        "$x+=('+'+($p1-replace'PART1',\"PART$i\"))}};mkvmerge @x"
+    )
+
+
+def write_merge_trim_hint(
+    output_dir: Path,
+    stem: str,
+    *,
+    trim_frames: int = 0,
+    split_mode: str = "ffmpeg_slice",
+) -> dict:
+    """Write ``{stem}.merge_trim_frames`` for the merge one-liner (0 = no trim)."""
+    output_dir.mkdir(parents=True, exist_ok=True)
+    hint_path = output_dir / f"{stem}.merge_trim_frames"
+    hint_path.write_text(f"{trim_frames}\n", encoding="utf-8")
+    return {
+        "path": str(hint_path),
+        "filename": hint_path.name,
+        "size_bytes": hint_path.stat().st_size,
+        "part_index": 0,
+        "part_count": 0,
+        "is_source": False,
+        "is_merge_helper": True,
+        "original_basename": stem,
+        "split_mode": split_mode,
+    }
+
+
+def _list_part_paths(output_dir: Path, stem: str, ext: str) -> list[Path]:
+    parts: list[tuple[int, Path]] = []
+    for path in output_dir.iterdir():
+        if not path.is_file():
+            continue
+        name = path.name
+        if not name.startswith(f"{stem}.PART") or not name.endswith(ext):
+            continue
+        mid = name[len(f"{stem}.PART"):-len(ext)]
+        if mid.isdigit():
+            parts.append((int(mid), path))
+    parts.sort(key=lambda t: t[0])
+    return [p for _, p in parts]
+
+
+def _plan_keyframe_split(
+    source: Path,
+    output_dir: Path,
+    part_size_bytes: int,
+    *,
+    ffprobe_bin: str,
+    probe_timeout: int,
+    ffmpeg_bin: str,
+    mkvmerge_bin: str,
+    ffmpeg_timeout: int,
+    extract_backend: str,
+    skip_check: Callable[[], None] | None,
+    on_log: Callable[[str], None] | None,
+) -> tuple[list[float], int]:
+    """Return ``(part_start_times, target_segment_sec)`` under the byte limit."""
+    size = source.stat().st_size
+    stem = source.stem
+    ext = source.suffix
+    duration = probe_duration(source, ffprobe_bin=ffprobe_bin)
+    bytes_per_sec = size / duration
+
+    segment_time: int | None = None
+    part_starts: list[float] | None = None
+    last_err: str | None = None
+    for factor in _TARGET_FACTORS:
+        if skip_check:
+            skip_check()
+
+        target_bytes = int(part_size_bytes * factor)
+        trial_segment_time = max(1, int(target_bytes / bytes_per_sec))
+        logger.info(
+            "Planning sparse keyframe split for %s (~%ds target, factor %s)",
+            source.name,
+            trial_segment_time,
+            factor,
+        )
+        _emit_log(
+            on_log,
+            f"Planning sparse keyframe split for {source.name} "
+            f"(~{trial_segment_time}s target, factor {factor})",
+        )
+        trial_starts = plan_sparse_keyframe_part_starts(
+            source,
+            duration,
+            trial_segment_time,
+            ffprobe_bin=ffprobe_bin,
+            probe_timeout=probe_timeout,
+            file_size=size,
+        )
+        probe_path = output_dir / f"{stem}.PART1{ext}"
+        probe_path.unlink(missing_ok=True)
+
+        first_end = trial_starts[1] if len(trial_starts) > 1 else duration
+        est_probe_size = int((first_end - trial_starts[0]) * bytes_per_sec * _PROBE_SIZE_MARGIN)
+        probe_skip_threshold = int(part_size_bytes * _PROBE_SKIP_ESTIMATE_RATIO)
+        if est_probe_size > probe_skip_threshold:
+            _extract_single_segment(
+                source,
+                probe_path,
+                0,
+                first_end,
+                duration=duration,
+                file_size=size,
+                ffmpeg_bin=ffmpeg_bin,
+                mkvmerge_bin=mkvmerge_bin,
+                max_timeout=ffmpeg_timeout,
+                extract_backend=extract_backend,
+                skip_check=skip_check,
+                on_log=on_log,
+            )
+            probe_size = probe_path.stat().st_size
+            probe_path.unlink(missing_ok=True)
+        else:
+            _emit_log(
+                on_log,
+                f"Skipping probe slice (est {est_probe_size:,} bytes "
+                f"≤ {probe_skip_threshold:,} threshold)",
+            )
+            probe_size = est_probe_size
+
+        if probe_size > part_size_bytes:
+            last_err = (
+                f"first slice exceeded limit at factor {factor} "
+                f"({probe_size:,} > {part_size_bytes:,} bytes)"
+            )
+            logger.warning(last_err)
+            continue
+
+        segment_time = trial_segment_time
+        part_starts = trial_starts
+        logger.info(
+            "ffmpeg keyframe-aligned split: %d part(s), ~%ds target (factor %s)",
+            len(trial_starts),
+            segment_time,
+            factor,
+        )
+        _emit_log(
+            on_log,
+            f"ffmpeg keyframe-aligned split: {len(trial_starts)} part(s), "
+            f"~{segment_time}s target (factor {factor})",
+        )
+        break
+
+    if segment_time is None or part_starts is None:
+        raise SplitError(
+            f"Unable to slice {source.name} under {part_size_bytes:,} bytes. Last: {last_err}"
+        )
+    return part_starts, segment_time
+
+
+def _run_segment_at_keyframes(
+    source: Path,
+    output_dir: Path,
+    stem: str,
+    ext: str,
+    part_starts: list[float],
+    *,
+    ffmpeg_bin: str,
+    timeout: int,
+    skip_check: Callable[[], None] | None = None,
+    on_log: Callable[[str], None] | None = None,
+) -> None:
+    """One-pass stream-copy split at keyframe boundaries (no duplicate boundary frames)."""
+    if len(part_starts) < 2:
+        raise SplitError("keyframe plan produced fewer than 2 parts")
+
+    times_str = ",".join(f"{t:.6f}" for t in part_starts[1:])
+    pattern = str(output_dir / f"{stem}.PART%d{ext}")
+    cmd = [
+        ffmpeg_bin,
+        "-hide_banner",
+        "-y",
+        "-i",
+        str(source),
+        *_copy_stream_maps(),
+        "-c",
+        "copy",
+        "-f",
+        "segment",
+        "-segment_times",
+        times_str,
+        "-reset_timestamps",
+        "1",
+        "-segment_start_number",
+        "1",
+        pattern,
+    ]
+    _emit_log(
+        on_log,
+        f"ffmpeg one-pass keyframe segment ({len(part_starts)} parts, boundaries={times_str})",
+    )
+
+    proc = subprocess.Popen(
+        cmd,
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.PIPE,
+        text=True,
+    )
+    deadline = time.time() + timeout
+    try:
+        while True:
+            if skip_check:
+                skip_check()
+            rc = proc.poll()
+            if rc is not None:
+                if rc != 0:
+                    tail = (proc.stderr.read() or "")[-600:]
+                    raise SplitError(f"ffmpeg segment failed (exit {rc}): {tail}")
+                return
+            if time.time() > deadline:
+                proc.kill()
+                proc.wait()
+                raise SplitError(f"ffmpeg segment timed out after {timeout}s")
+            time.sleep(0.25)
+    finally:
+        if proc.poll() is None:
+            proc.kill()
+            proc.wait()
+
+
+def iter_upload_parts_ffmpeg(
+    source: str | Path,
+    output_dir: str | Path,
+    part_size_bytes: int,
+    *,
+    ffmpeg_bin: str = "ffmpeg",
+    ffprobe_bin: str = "ffprobe",
+    mkvmerge_bin: str = "mkvmerge",
+    ffmpeg_timeout: int = 1800,
+    ffprobe_keyframe_timeout: int = 300,
+    extract_backend: str = "ffmpeg",
+    skip_check: Callable[[], None] | None = None,
+    delete_source: bool = True,
+    skip_part_indices: frozenset[int] = frozenset(),
+    reuse_existing_parts: bool = False,
+    on_log: Callable[[str], None] | None = None,
+    on_parts_planned: Callable[[int], None] | None = None,
+    on_split_progress: Callable[[int, int, int, str, int], None] | None = None,
+) -> Iterator[dict]:
+    """Yield all parts after one ffmpeg pass (~2× source disk during split)."""
+    source = Path(source)
+    output_dir = Path(output_dir)
+    output_dir.mkdir(parents=True, exist_ok=True)
+
+    if not source.exists():
+        raise FileNotFoundError(f"Source file not found: {source}")
+
+    size = source.stat().st_size
+    if size <= part_size_bytes:
+        yield {
+            "path": str(source),
+            "filename": source.name,
+            "size_bytes": size,
+            "part_index": 0,
+            "part_count": 1,
+            "is_source": True,
+            "original_basename": source.name,
+            "split_mode": "ffmpeg",
+        }
+        return
+
+    stem = source.stem
+    ext = source.suffix
+    probe_timeout = _probe_timeout_for_file(size, ffprobe_keyframe_timeout)
+
+    part_starts, _ = _plan_keyframe_split(
+        source,
+        output_dir,
+        part_size_bytes,
+        ffprobe_bin=ffprobe_bin,
+        probe_timeout=probe_timeout,
+        ffmpeg_bin=ffmpeg_bin,
+        mkvmerge_bin=mkvmerge_bin,
+        ffmpeg_timeout=ffmpeg_timeout,
+        extract_backend=extract_backend,
+        skip_check=skip_check,
+        on_log=on_log,
+    )
+
+    original = source.name
+    num_parts = len(part_starts)
+    if on_parts_planned:
+        on_parts_planned(num_parts)
+
+    for stale in _list_part_paths(output_dir, stem, ext):
+        stale.unlink(missing_ok=True)
+
+    if on_split_progress:
+        on_split_progress(1, 0, size, f"{stem}.PART1{ext}", num_parts)
+
+    _run_segment_at_keyframes(
+        source,
+        output_dir,
+        stem,
+        ext,
+        part_starts,
+        ffmpeg_bin=ffmpeg_bin,
+        timeout=ffmpeg_timeout,
+        skip_check=skip_check,
+        on_log=on_log,
+    )
+
+    produced = _list_part_paths(output_dir, stem, ext)
+    if len(produced) != num_parts:
+        raise SplitError(
+            f"ffmpeg produced {len(produced)} part(s), expected {num_parts}"
+        )
+
+    for idx, part_path in enumerate(produced, start=1):
+        if skip_check:
+            skip_check()
+        part_name = part_path.name
+        part_no = idx
+        if part_no in skip_part_indices:
+            continue
+        part_size = part_path.stat().st_size
+        if reuse_existing_parts and part_size > 0 and part_size <= part_size_bytes:
+            pass
+        elif part_size > part_size_bytes:
+            part_path.unlink(missing_ok=True)
+            raise SplitError(
+                f"Part {part_no} ({part_name}) is {part_size:,} bytes "
+                f"(> {part_size_bytes:,} bytes)"
+            )
+        if on_split_progress:
+            on_split_progress(part_no, part_size, part_size_bytes, part_name, num_parts)
+        yield {
+            "path": str(part_path),
+            "filename": part_name,
+            "size_bytes": part_size,
+            "part_index": part_no,
+            "part_count": num_parts,
+            "is_source": False,
+            "original_basename": original,
+            "split_mode": "ffmpeg",
+        }
+
+    if num_parts > 1:
+        yield write_merge_trim_hint(
+            output_dir, stem, trim_frames=0, split_mode="ffmpeg",
+        )
+
+    if delete_source and not skip_part_indices:
+        source.unlink(missing_ok=True)
+        _emit_log(on_log, f"Removed source after splitting: {source.name}")
 
 
 def _format_mkvmerge_time(sec: float) -> str:
@@ -665,7 +1077,10 @@ def _extract_single_segment_ffmpeg(
         f"{start_sec:.6f}",
     ]
     if end_sec < duration - _KEYFRAME_EPS:
-        cmd.extend(["-to", f"{end_sec:.6f}"])
+        # End before the next part's keyframe so rejoin does not duplicate that frame.
+        segment_t = end_sec - start_sec - probe_frame_step(path)
+        segment_t = max(_KEYFRAME_EPS, segment_t)
+        cmd.extend(["-t", f"{segment_t:.6f}"])
     cmd.extend(
         [
             "-i",
@@ -823,95 +1238,21 @@ def iter_upload_parts_sliced(
     stem = source.stem
     ext = source.suffix
     duration = probe_duration(source, ffprobe_bin=ffprobe_bin)
-    bytes_per_sec = size / duration
     probe_timeout = _probe_timeout_for_file(size, ffprobe_keyframe_timeout)
 
-    segment_time = None
-    part_starts = None
-    last_err = None
-    for factor in _TARGET_FACTORS:
-        if skip_check:
-            skip_check()
-
-        target_bytes = int(part_size_bytes * factor)
-        trial_segment_time = max(1, int(target_bytes / bytes_per_sec))
-        logger.info(
-            "Planning sparse keyframe split for %s (~%ds target, factor %s)",
-            source.name,
-            trial_segment_time,
-            factor,
-        )
-        _emit_log(
-            on_log,
-            f"Planning sparse keyframe split for {source.name} "
-            f"(~{trial_segment_time}s target, factor {factor})",
-        )
-        trial_starts = plan_sparse_keyframe_part_starts(
-            source,
-            duration,
-            trial_segment_time,
-            ffprobe_bin=ffprobe_bin,
-            probe_timeout=probe_timeout,
-            file_size=size,
-        )
-        probe_path = output_dir / f"{stem}.PART1{ext}"
-        probe_path.unlink(missing_ok=True)
-
-        first_end = trial_starts[1] if len(trial_starts) > 1 else duration
-        est_probe_size = int((first_end - trial_starts[0]) * bytes_per_sec * _PROBE_SIZE_MARGIN)
-        probe_skip_threshold = int(part_size_bytes * _PROBE_SKIP_ESTIMATE_RATIO)
-        if est_probe_size > probe_skip_threshold:
-            _extract_single_segment(
-                source,
-                probe_path,
-                0,
-                first_end,
-                duration=duration,
-                file_size=size,
-                ffmpeg_bin=ffmpeg_bin,
-                mkvmerge_bin=mkvmerge_bin,
-                max_timeout=ffmpeg_timeout,
-                extract_backend=extract_backend,
-                skip_check=skip_check,
-                on_log=on_log,
-            )
-            probe_size = probe_path.stat().st_size
-            probe_path.unlink(missing_ok=True)
-        else:
-            _emit_log(
-                on_log,
-                f"Skipping probe slice (est {est_probe_size:,} bytes "
-                f"≤ {probe_skip_threshold:,} threshold)",
-            )
-            probe_size = est_probe_size
-
-        if probe_size > part_size_bytes:
-            last_err = (
-                f"first slice exceeded limit at factor {factor} "
-                f"({probe_size:,} > {part_size_bytes:,} bytes)"
-            )
-            logger.warning(last_err)
-            continue
-
-        segment_time = trial_segment_time
-        part_starts = trial_starts
-        logger.info(
-            "ffmpeg keyframe-aligned slice: %d part(s), ~%ds target (factor %s)",
-            len(trial_starts),
-            segment_time,
-            factor,
-        )
-        _emit_log(
-            on_log,
-            f"ffmpeg keyframe-aligned slice: {len(trial_starts)} part(s), "
-            f"~{segment_time}s target (factor {factor})",
-        )
-        break
-
-    if segment_time is None or part_starts is None:
-        raise SplitError(
-            f"Unable to slice {source.name} under {part_size_bytes:,} bytes. Last: {last_err}"
-        )
+    part_starts, _ = _plan_keyframe_split(
+        source,
+        output_dir,
+        part_size_bytes,
+        ffprobe_bin=ffprobe_bin,
+        probe_timeout=probe_timeout,
+        ffmpeg_bin=ffmpeg_bin,
+        mkvmerge_bin=mkvmerge_bin,
+        ffmpeg_timeout=ffmpeg_timeout,
+        extract_backend=extract_backend,
+        skip_check=skip_check,
+        on_log=on_log,
+    )
 
     original = source.name
     num_parts = len(part_starts)
@@ -987,6 +1328,11 @@ def iter_upload_parts_sliced(
             "original_basename": original,
             "split_mode": "ffmpeg_slice",
         }
+
+    if num_parts > 1:
+        yield write_merge_trim_hint(
+            output_dir, stem, trim_frames=0, split_mode="ffmpeg_slice",
+        )
 
     if delete_source and not skip_part_indices:
         source.unlink(missing_ok=True)

@@ -27,12 +27,13 @@ from migradora.realdebrid_client import (
     needs_resolution,
     RealDebridClient,
 )
-from migradora.splitter import iter_upload_parts
 from migradora.size_limits import (
     disk_insufficient_skip_reason,
     incremental_disk_gb,
     oversize_skip_reason,
+    resolve_split_mode,
 )
+from migradora.splitter import iter_upload_parts
 from migradora.stashdb_client import StashdbClient, resolve_stashdb_metadata
 from migradora.transfer_stats import TransferTracker, eta_seconds, format_size
 from migradora.upload_progress import UploadProgressReporter
@@ -811,7 +812,9 @@ class PipelineCoordinator:
                     self.settings.filester_max_file_bytes,
                     base_name=local_path.stem,
                     skip_check=lambda: self._check_skip(job.id),
-                    split_mode=self.settings.filester_split_mode,
+                    split_mode=resolve_split_mode(
+                        local_path.stat().st_size, self.settings
+                    ),
                     ffmpeg_bin=self.settings.ffmpeg_bin,
                     ffprobe_bin=self.settings.ffprobe_bin,
                     mkvmerge_bin=self.settings.mkvmerge_bin,
@@ -832,6 +835,20 @@ class PipelineCoordinator:
                     part = next(parts_iter)
                 except StopIteration:
                     break
+
+                if part.get("is_merge_helper"):
+                    part_path = Path(part["path"])
+                    job_log(f"[Filester] Uploading {part['filename']}")
+                    filester.upload_file(
+                        part_path,
+                        folder_id=folder_id,
+                        on_log=job_log,
+                    )
+                    try:
+                        part_path.unlink(missing_ok=True)
+                    except OSError:
+                        pass
+                    continue
 
                 if int(part.get("part_count") or 1) > 1:
                     was_split = True

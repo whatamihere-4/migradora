@@ -7,7 +7,11 @@ import math
 from collections.abc import Callable, Iterator
 from pathlib import Path
 
-from migradora.ffmpeg_splitter import SplitError, iter_upload_parts_sliced
+from migradora.ffmpeg_splitter import (
+    SplitError,
+    iter_upload_parts_ffmpeg,
+    iter_upload_parts_sliced,
+)
 
 logger = logging.getLogger("migradora.splitter")
 
@@ -28,6 +32,8 @@ _SPLIT_MODE_ALIASES = {
     "ffmpeg_slice": "ffmpeg_slice",
     "ffmpeg-slice": "ffmpeg_slice",
     "slice": "ffmpeg_slice",
+    "ffmpeg": "ffmpeg",
+    "optimal": "optimal",
 }
 
 
@@ -208,6 +214,10 @@ def iter_upload_parts(
 
     ``ffmpeg_slice``: playable keyframe-aligned parts via ffmpeg stream copy
     (one part at a time; same disk peak as bytes mode).
+
+    ``ffmpeg``: one-pass ffmpeg segment at keyframe boundaries (~2× disk during split).
+
+    ``optimal`` is resolved per file before calling (see :func:`resolve_split_mode`).
     """
     source = Path(source)
     output_dir = Path(output_dir)
@@ -217,6 +227,26 @@ def iter_upload_parts(
         raise FileNotFoundError(f"Source file not found: {source}")
 
     mode = parse_split_mode(split_mode)
+    if mode == "ffmpeg":
+        yield from iter_upload_parts_ffmpeg(
+            source,
+            output_dir,
+            part_size_bytes,
+            ffmpeg_bin=ffmpeg_bin,
+            ffprobe_bin=ffprobe_bin,
+            mkvmerge_bin=mkvmerge_bin,
+            ffmpeg_timeout=ffmpeg_timeout,
+            ffprobe_keyframe_timeout=ffprobe_keyframe_timeout,
+            extract_backend=extract_backend,
+            skip_check=skip_check,
+            delete_source=delete_source,
+            skip_part_indices=skip_part_indices,
+            reuse_existing_parts=reuse_existing_parts,
+            on_log=on_log,
+            on_parts_planned=on_parts_planned,
+            on_split_progress=on_split_progress,
+        )
+        return
     if mode == "ffmpeg_slice":
         yield from iter_upload_parts_sliced(
             source,
